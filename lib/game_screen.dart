@@ -1,17 +1,17 @@
 import 'package:flame/game.dart';
 import 'package:flame/events.dart';
+import 'package:flame_audio/flame_audio.dart';
 import 'package:flutter/material.dart';
 import 'dart:math';
 import 'package:flame/components.dart';
 
-// Block კლასი
-// Special block types for power-ups
+// Block class
 enum BlockType {
   normal,
-  lineClear, // Clears entire row and column
-  colorBomb, // Clears all blocks of same color
-  timeSlow, // Slows down timer
-  shrink, // Can be placed in smaller spaces
+  lineClear,
+  colorBomb,
+  timeSlow,
+  shrink,
 }
 
 class Block {
@@ -40,12 +40,8 @@ class Block {
            BlockBlastGame.blockColors[Random().nextInt(
              BlockBlastGame.blockColors.length,
            )] {
-    // Random chance to create special blocks
     if (Random().nextDouble() < 0.15) {
-      // 15% chance for special block
       type = BlockType.values[Random().nextInt(BlockType.values.length)];
-
-      // Adjust appearance based on type
       switch (type) {
         case BlockType.lineClear:
           color = Colors.yellow[700]!;
@@ -64,13 +60,10 @@ class Block {
           break;
       }
     }
-
-    // Animate block appearance
     _startEntryAnimation();
   }
 
   void _startEntryAnimation() {
-    // Animate from scale 0 to 1 with bounce
     Future.delayed(Duration.zero, () async {
       for (int i = 0; i < 20; i++) {
         scale = sin(i / 20 * pi) * 0.3 + 0.7;
@@ -87,61 +80,78 @@ class Block {
 
 class BlockBlastGame extends FlameGame with PanDetector {
   static const int gridSize = 10;
-  double cellSize = 50; // Responsive structure, but always fixed
-  double cellPadding = 4;
-  double gridPadding = 40;
-  double bottomBlocksY = 650;
+  late double cellSize;
+  late double cellPadding;
+  late double gridPadding;
+  late double bottomBlocksY;
 
-  // Achievement tracking
+  // Audio management
+  bool audioLoaded = false;
+  
+  // Hint System
+  bool showHint = false;
+  (int, int, int)? hintPosition;
+  double hintOpacity = 0.0;
+  bool isHintAvailable = false;
+  int hintCost = 0;
+  
+  // Responsive scaling factors
+  double get scaleFactor => min(size.x, size.y) / 600;
+  double get smallScaleFactor => min(1.0, scaleFactor);
+
+  // AI Analysis
+  String aiFeedback = "";
+  bool showFeedback = false;
+  double feedbackOpacity = 0.0;
+  Color feedbackColor = Colors.white;
+
+  // Game state
   int highScore = 0;
   int maxCombo = 0;
   int totalLinesCleared = 0;
   int specialPatternsFound = 0;
-
-  // Combo system
   int currentCombo = 0;
   double comboTimer = 0.0;
-  static const double comboTimeWindow =
-      3.0; // Time window for maintaining combo
+  static const double comboTimeWindow = 3.0;
 
   // Power-up effects
   bool isTimeSlowed = false;
   double timeSlowDuration = 0.0;
-  static const double timeSlowFactor = 0.5; // Timer runs at half speed
+  static const double timeSlowFactor = 0.5;
 
   // Pattern recognition
-  bool hasRainbowPattern = false; // All colors in a row/column
-  bool hasFramePattern = false; // Blocks around the edge
-  bool hasDiagonalLine = false; // Complete diagonal line
+  bool hasRainbowPattern = false;
+  bool hasFramePattern = false;
+  bool hasDiagonalLine = false;
 
   // Properties for placement preview
-  (int, int)? currentGridPosition; // Current grid position while dragging
-  double previewOpacity = 0.0; // Opacity for the preview effect
-  bool isValidPosition = false; // Whether current position is valid
+  (int, int)? currentGridPosition;
+  double previewOpacity = 0.0;
+  bool isValidPosition = false;
 
   bool showContinuePrompt = false;
   double continuePromptTimer = 5.0;
   bool canContinue = true;
+  int continueCost = 0;
 
   // Animation properties
   List<({Offset position, Color color, double scale, double opacity})>
   blockPlacementEffects = [];
-  List<({int row, int col, double scale, double opacity})> cellClearEffects =
-      [];
+  List<({int row, int col, double scale, double opacity})> cellClearEffects = [];
   double scoreAnimationScale = 1.0;
   Color? lastScoreColor;
-  int displayScore = 0; // For smooth score animation
+  int displayScore = 0;
 
   // Modern color palette for blocks
   static final List<Color> blockColors = [
-    const Color(0xFF2196F3), // Vibrant Blue
-    const Color(0xFFE91E63), // Pink
-    const Color(0xFF4CAF50), // Material Green
-    const Color(0xFFFF9800), // Orange
-    const Color(0xFF9C27B0), // Purple
-    const Color(0xFF00BCD4), // Cyan
-    const Color(0xFFFFEB3B), // Yellow
-    const Color(0xFF673AB7), // Deep Purple
+    const Color(0xFF2196F3),
+    const Color(0xFFE91E63),
+    const Color(0xFF4CAF50),
+    const Color(0xFFFF9800),
+    const Color(0xFF9C27B0),
+    const Color(0xFF00BCD4),
+    const Color(0xFFFFEB3B),
+    const Color(0xFF673AB7),
   ];
 
   // Gradient pairs for each block color
@@ -167,162 +177,367 @@ class BlockBlastGame extends FlameGame with PanDetector {
   Block? draggingBlock;
   int placedBlockCount = 0;
 
-  @override
+  // Score multiplier for consecutive successful placements
+  double scoreMultiplier = 1.0;
+  int consecutivePlacements = 0;
+  DateTime? lastPlacementTime;
+  bool hasExplosivePowerUp = false;
+  bool hasColorMatchPowerUp = false;
+
   @override
   Future<void> onLoad() async {
     super.onLoad();
-    // Always set fixed values, even if screen size changes
-    cellSize = 50;
-    cellPadding = 4;
-    gridPadding = 40;
-    bottomBlocksY = 650;
+    _calculateResponsiveValues();
     generateBottomBlocks();
+    await _loadAudio();
+    _updateHintAvailability();
+  }
+
+  Future<void> _loadAudio() async {
+    try {
+      await FlameAudio.audioCache.loadAll(['error.mp3', 'good.mp3']);
+      audioLoaded = true;
+    } catch (e) {
+      print('Error loading audio: $e');
+    }
+  }
+
+  void _playErrorSound() {
+    if (audioLoaded) {
+      try {
+        FlameAudio.play('error.mp3', volume: 0.7);
+      } catch (e) {
+        print('Error playing sound: $e');
+      }
+    }
+  }
+
+  void _playGoodSound() {
+    if (audioLoaded) {
+      try {
+        FlameAudio.play('good.mp3', volume: 0.7);
+      } catch (e) {
+        print('Error playing sound: $e');
+      }
+    }
+  }
+
+  @override
+  void onGameResize(Vector2 size) {
+    super.onGameResize(size);
+    _calculateResponsiveValues();
+    if (bottomBlocks.isNotEmpty) {
+      _positionBottomBlocks();
+    }
+  }
+
+  void _calculateResponsiveValues() {
+    final minDimension = min(size.x, size.y);
+    
+    cellSize = max(30.0, min(50.0, minDimension * 0.08));
+    cellPadding = max(2.0, cellSize * 0.08);
+    gridPadding = max(20.0, minDimension * 0.05);
+    
+    final gridHeight = gridSize * cellSize + (gridSize - 1) * cellPadding;
+    bottomBlocksY = gridPadding + gridHeight + 40;
   }
 
   void generateBottomBlocks() {
     bottomBlocks = List.generate(3, (_) => Block(randomShape(), Offset(0, 0)));
+    _positionBottomBlocks();
+    placedBlockCount = 0;
+    _updateHintAvailability();
+  }
 
-    // Calculate total width of bottom blocks to center them
+  void _positionBottomBlocks() {
     double totalWidth = 0;
     for (var block in bottomBlocks) {
       totalWidth += block.shape[0].length * (cellSize + cellPadding);
     }
-    totalWidth +=
-        (bottomBlocks.length - 1) * cellSize; // spacing between blocks
+    totalWidth += (bottomBlocks.length - 1) * cellSize;
 
     double startX = (size.x - totalWidth) / 2;
     for (int i = 0; i < bottomBlocks.length; i++) {
-      double blockWidth =
-          bottomBlocks[i].shape[0].length * (cellSize + cellPadding);
+      double blockWidth = bottomBlocks[i].shape[0].length * (cellSize + cellPadding);
       bottomBlocks[i].position = Offset(startX, bottomBlocksY);
-      startX += blockWidth + cellSize; // Add space between blocks
+      startX += blockWidth + cellSize;
     }
-    placedBlockCount = 0;
+  }
+
+  // Hint System Functions
+  void _updateHintAvailability() {
+    hintCost = score ~/ 2;
+    isHintAvailable = score > 0 && hintCost > 0;
+  }
+
+  void activateHint() {
+    if (!isHintAvailable || score == 0) return;
+    
+    hintCost = score ~/ 2;
+    if (hintCost <= 0) return;
+    
+    score -= hintCost;
+    displayScore = score;
+    
+    _findAndShowBestMove();
+    _updateHintAvailability();
+    
+    aiFeedback = "Hint: -$hintCost points";
+    feedbackColor = Colors.orange;
+    showFeedback = true;
+    feedbackOpacity = 1.0;
+    
+    Future.delayed(const Duration(seconds: 2), () {
+      showFeedback = false;
+    });
+  }
+
+  void _findAndShowBestMove() {
+    int bestScore = -1;
+    (int, int, int)? bestMove;
+    
+    for (int blockIndex = 0; blockIndex < bottomBlocks.length; blockIndex++) {
+      var block = bottomBlocks[blockIndex];
+      
+      for (int y = 0; y <= gridSize - block.shape.length; y++) {
+        for (int x = 0; x <= gridSize - block.shape[0].length; x++) {
+          if (canPlace(block.shape, x, y)) {
+            int placementScore = _calculatePlacementScore(block, x, y);
+            if (placementScore > bestScore) {
+              bestScore = placementScore;
+              bestMove = (blockIndex, x, y);
+            }
+          }
+        }
+      }
+    }
+    
+    if (bestMove != null) {
+      hintPosition = bestMove;
+      showHint = true;
+      hintOpacity = 1.0;
+      
+      Future.delayed(const Duration(seconds: 5), () {
+        showHint = false;
+        hintPosition = null;
+      });
+    }
+  }
+
+  void _drawHint(Canvas canvas) {
+    if (!showHint || hintPosition == null) return;
+    
+    final (blockIndex, hintX, hintY) = hintPosition!;
+    if (blockIndex >= bottomBlocks.length) return;
+    
+    var block = bottomBlocks[blockIndex];
+    final gridWidth = gridSize * cellSize + (gridSize - 1) * cellPadding;
+    final gridLeft = (size.x - gridWidth) / 2;
+    final gridTop = gridPadding;
+    
+    final blockRect = Rect.fromLTWH(
+      block.position.dx,
+      block.position.dy,
+      block.shape[0].length * cellSize,
+      block.shape.length * cellSize,
+    );
+    
+    final glowAnimation = sin(DateTime.now().millisecondsSinceEpoch / 200) * 0.3 + 0.7;
+    final glowPaint = Paint()
+      ..color = Colors.yellow.withOpacity(0.5 * hintOpacity * glowAnimation)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4
+      ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8);
+    
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(blockRect.inflate(8), Radius.circular(cellSize * 0.2)),
+      glowPaint,
+    );
+    
+    for (int y = 0; y < block.shape.length; y++) {
+      for (int x = 0; x < block.shape[y].length; x++) {
+        if (block.shape[y][x] == 1) {
+          final hintRect = Rect.fromLTWH(
+            gridLeft + (hintX + x) * (cellSize + cellPadding),
+            gridTop + (hintY + y) * (cellSize + cellPadding),
+            cellSize,
+            cellSize,
+          );
+          
+          final placementGlow = Paint()
+            ..color = Colors.green.withOpacity(0.4 * hintOpacity * glowAnimation)
+            ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 6);
+          
+          canvas.drawRRect(
+            RRect.fromRectAndRadius(hintRect.inflate(6), Radius.circular(cellSize * 0.2)),
+            placementGlow,
+          );
+          
+          canvas.drawRRect(
+            RRect.fromRectAndRadius(hintRect, Radius.circular(cellSize * 0.16)),
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2
+              ..color = Colors.green.withOpacity(hintOpacity),
+          );
+        }
+      }
+    }
+    
+    final blockCenter = Offset(
+      blockRect.center.dx,
+      blockRect.center.dy,
+    );
+    
+    final placementCenter = Offset(
+      gridLeft + (hintX + block.shape[0].length / 2) * (cellSize + cellPadding),
+      gridTop + (hintY + block.shape.length / 2) * (cellSize + cellPadding),
+    );
+    
+    final linePaint = Paint()
+      ..color = Colors.yellow.withOpacity(0.6 * hintOpacity)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round;
+    
+    canvas.drawLine(blockCenter, placementCenter, linePaint);
+    _drawArrow(canvas, placementCenter, blockCenter, Colors.yellow.withOpacity(hintOpacity));
+  }
+
+  void _drawArrow(Canvas canvas, Offset from, Offset to, Color color) {
+    final direction = (to - from).normalized;
+    const arrowSize = 8.0;
+    
+    final arrowPaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    
+    final path = Path();
+    path.moveTo(from.dx, from.dy);
+    
+    final perpendicular = Offset(-direction.dy, direction.dx);
+    final arrowPoint1 = from + direction * arrowSize + perpendicular * arrowSize * 0.5;
+    final arrowPoint2 = from + direction * arrowSize - perpendicular * arrowSize * 0.5;
+    
+    path.lineTo(arrowPoint1.dx, arrowPoint1.dy);
+    path.lineTo(arrowPoint2.dx, arrowPoint2.dy);
+    path.close();
+    
+    canvas.drawPath(path, arrowPaint);
+  }
+
+  // AI Analysis
+  void _analyzeMove(Block block, int x, int y) {
+    int placementScore = _calculatePlacementScore(block, x, y);
+    
+    if (placementScore >= 40) {
+      aiFeedback = "Great Move! +${placementScore}";
+      feedbackColor = Colors.green;
+    } else if (placementScore >= 25) {
+      aiFeedback = "Good Move +${placementScore}";
+      feedbackColor = Colors.lightGreen;
+    } else if (placementScore >= 15) {
+      aiFeedback = "Nice +${placementScore}";
+      feedbackColor = Colors.yellow;
+    } else if (placementScore >= 5) {
+      aiFeedback = "OK +${placementScore}";
+      feedbackColor = Colors.orange;
+    } else {
+      aiFeedback = "Poor +${placementScore}";
+      feedbackColor = Colors.red;
+    }
+    
+    showFeedback = true;
+    feedbackOpacity = 1.0;
+    
+    Future.delayed(const Duration(seconds: 2), () {
+      showFeedback = false;
+    });
+  }
+
+  int _calculatePlacementScore(Block block, int x, int y) {
+    int score = 0;
+    
+    var tempGrid = _copyGrid();
+    _placeBlockOnGrid(tempGrid, block, x, y);
+    
+    score += _checkLinesForScore(tempGrid) * 15;
+    
+    int centerX = gridSize ~/ 2;
+    int centerY = gridSize ~/ 2;
+    double distanceFromCenter = sqrt(pow(x - centerX, 2) + pow(y - centerY, 2));
+    score += max(0, (12 - distanceFromCenter).toInt());
+    
+    score += block.shape.length * block.shape[0].length;
+    
+    return score;
+  }
+
+  List<List<Color?>> _copyGrid() {
+    return grid.map((row) => List<Color?>.from(row)).toList();
+  }
+
+  void _placeBlockOnGrid(List<List<Color?>> targetGrid, Block block, int x, int y) {
+    for (int dy = 0; dy < block.shape.length; dy++) {
+      for (int dx = 0; dx < block.shape[dy].length; dx++) {
+        if (block.shape[dy][dx] == 1) {
+          targetGrid[y + dy][x + dx] = block.color;
+        }
+      }
+    }
+  }
+
+  int _checkLinesForScore(List<List<Color?>> targetGrid) {
+    int lines = 0;
+    
+    for (int y = 0; y < gridSize; y++) {
+      if (targetGrid[y].every((cell) => cell != null)) {
+        lines++;
+      }
+    }
+    
+    for (int x = 0; x < gridSize; x++) {
+      bool fullColumn = true;
+      for (int y = 0; y < gridSize; y++) {
+        if (targetGrid[y][x] == null) {
+          fullColumn = false;
+          break;
+        }
+      }
+      if (fullColumn) lines++;
+    }
+    
+    return lines;
   }
 
   List<List<int>> randomShape() {
-    int type = random.nextInt(20); // Increased number of block types
+    int type = random.nextInt(20);
     switch (type) {
-      case 0: // Single block
-        return [
-          [1],
-        ];
-      case 1: // Horizontal duo
-        return [
-          [1, 1],
-        ];
-      case 2: // Vertical duo
-        return [
-          [1],
-          [1],
-        ];
-      case 3: // Square
-        return [
-          [1, 1],
-          [1, 1],
-        ];
-      case 4: // Horizontal trio
-        return [
-          [1, 1, 1],
-        ];
-      case 5: // L shape
-        return [
-          [1, 0],
-          [1, 0],
-          [1, 1],
-        ];
-      case 6: // Reverse L shape
-        return [
-          [0, 1],
-          [0, 1],
-          [1, 1],
-        ];
-      case 7: // T shape
-        return [
-          [1, 1, 1],
-          [0, 1, 0],
-        ];
-      case 8: // S shape
-        return [
-          [0, 1, 1],
-          [1, 1, 0],
-        ];
-      case 9: // Z shape
-        return [
-          [1, 1, 0],
-          [0, 1, 1],
-        ];
-      case 10: // Long piece
-        return [
-          [1],
-          [1],
-          [1],
-          [1],
-        ];
-      case 11: // Plus shape
-        return [
-          [0, 1, 0],
-          [1, 1, 1],
-          [0, 1, 0],
-        ];
-      // New 3x3 Blocks
-      case 12: // 3x3 Full Square
-        return [
-          [1, 1, 1],
-          [1, 1, 1],
-          [1, 1, 1],
-        ];
-      case 13: // U Shape
-        return [
-          [1, 0, 1],
-          [1, 0, 1],
-          [1, 1, 1],
-        ];
-      case 14: // H Shape
-        return [
-          [1, 0, 1],
-          [1, 1, 1],
-          [1, 0, 1],
-        ];
-      case 15: // Cross Shape
-        return [
-          [1, 0, 1],
-          [0, 1, 0],
-          [1, 0, 1],
-        ];
-      case 16: // Window Shape
-        return [
-          [1, 1, 1],
-          [1, 0, 1],
-          [1, 1, 1],
-        ];
-      case 17: // C Shape
-        return [
-          [1, 1, 1],
-          [1, 0, 0],
-          [1, 1, 1],
-        ];
-      case 18: // Diagonal Shape
-        return [
-          [1, 0, 0],
-          [0, 1, 0],
-          [0, 0, 1],
-        ];
-      case 19: // Corner Frame
-        return [
-          [1, 1, 0],
-          [1, 0, 0],
-          [1, 1, 1],
-        ];
-      default:
-        return [
-          [1],
-        ];
+      case 0: return [[1]];
+      case 1: return [[1, 1]];
+      case 2: return [[1], [1]];
+      case 3: return [[1, 1], [1, 1]];
+      case 4: return [[1, 1, 1]];
+      case 5: return [[1, 0], [1, 0], [1, 1]];
+      case 6: return [[0, 1], [0, 1], [1, 1]];
+      case 7: return [[1, 1, 1], [0, 1, 0]];
+      case 8: return [[0, 1, 1], [1, 1, 0]];
+      case 9: return [[1, 1, 0], [0, 1, 1]];
+      case 10: return [[1], [1], [1], [1]];
+      case 11: return [[0, 1, 0], [1, 1, 1], [0, 1, 0]];
+      case 12: return [[1, 1, 1], [1, 1, 1], [1, 1, 1]];
+      case 13: return [[1, 0, 1], [1, 0, 1], [1, 1, 1]];
+      case 14: return [[1, 0, 1], [1, 1, 1], [1, 0, 1]];
+      case 15: return [[1, 0, 1], [0, 1, 0], [1, 0, 1]];
+      case 16: return [[1, 1, 1], [1, 0, 1], [1, 1, 1]];
+      case 17: return [[1, 1, 1], [1, 0, 0], [1, 1, 1]];
+      case 18: return [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+      case 19: return [[1, 1, 0], [1, 0, 0], [1, 1, 1]];
+      default: return [[1]];
     }
   }
 
   bool canPlaceAnyBlock() {
-    // Check if any block can be placed anywhere on the grid
     for (var block in bottomBlocks) {
       for (int y = 0; y <= gridSize - block.shape.length; y++) {
         for (int x = 0; x <= gridSize - block.shape[0].length; x++) {
@@ -355,29 +570,21 @@ class BlockBlastGame extends FlameGame with PanDetector {
       }
     }
 
-    // Update cell clear effects with enhanced animations
+    // Update cell clear effects
     final now = DateTime.now().millisecondsSinceEpoch / 300.0;
-
     for (int i = cellClearEffects.length - 1; i >= 0; i--) {
       var effect = cellClearEffects[i];
-
-      // Add wave animation
       double waveOffset = sin(now + effect.col * 0.5) * 4.0;
-
-      // Update with wave and pulse effects
       effect = (
-        row: (effect.row + waveOffset * 0.1).round(), // Apply wave offset
+        row: (effect.row + waveOffset * 0.1).round(),
         col: effect.col,
-        scale: effect.scale + dt * 2 + sin(now * 4) * 0.1, // Pulsing scale
-        opacity: effect.opacity - dt * 1.5, // Slower fade out
+        scale: effect.scale + dt * 2 + sin(now * 4) * 0.1,
+        opacity: effect.opacity - dt * 1.5,
       );
-
       if (effect.opacity <= 0) {
         cellClearEffects.removeAt(i);
       } else {
         cellClearEffects[i] = effect;
-
-        // Add sparkle effects
         if (Random().nextDouble() < dt * 2) {
           final sparkX = effect.col + (Random().nextDouble() - 0.5) * 0.5;
           final sparkY = effect.row + (Random().nextDouble() - 0.5) * 0.5;
@@ -391,24 +598,37 @@ class BlockBlastGame extends FlameGame with PanDetector {
       }
     }
 
+    // Update hint opacity
+    if (showHint) {
+      hintOpacity = max(0.0, hintOpacity - dt * 0.2);
+      if (hintOpacity <= 0) {
+        showHint = false;
+        hintPosition = null;
+      }
+    }
+
+    // Update feedback opacity
+    if (showFeedback) {
+      feedbackOpacity = max(0.0, feedbackOpacity - dt * 0.5);
+      if (feedbackOpacity <= 0) {
+        showFeedback = false;
+      }
+    }
+
     // Animate score
     if (scoreAnimationScale > 1.0) {
       scoreAnimationScale = max(1.0, scoreAnimationScale - dt * 2);
     }
     if (displayScore < score) {
-      displayScore = min(
-        score,
-        displayScore + (score - displayScore) ~/ 10 + 1,
-      );
+      displayScore = min(score, displayScore + (score - displayScore) ~/ 10 + 1);
     }
 
     if (showContinuePrompt) {
       continuePromptTimer -= dt;
       if (continuePromptTimer <= 0) {
         if (score % 2 == 0) {
-          startNewGame(); // Start new game if timer runs out
+          startNewGame();
         } else {
-          // For odd scores, just clear everything
           bottomBlocks.clear();
           showContinuePrompt = false;
           continuePromptTimer = 5.0;
@@ -416,22 +636,20 @@ class BlockBlastGame extends FlameGame with PanDetector {
       }
     }
 
-    // Check if game is over (no blocks and not showing prompt)
     if (bottomBlocks.isEmpty && !showContinuePrompt) {
-      // Start new game after a short delay
       Future.delayed(const Duration(seconds: 2), () {
         startNewGame();
       });
     }
 
-    // Check if no moves are possible
     if (!showContinuePrompt && bottomBlocks.isNotEmpty && !canPlaceAnyBlock()) {
       showContinuePrompt = true;
       continuePromptTimer = 5.0;
       canContinue = true;
+      continueCost = score ~/ 2;
+      _playErrorSound();
     }
 
-    // Update block animations
     for (var block in bottomBlocks) {
       if (block.scale < 1.0) {
         block.scale = min(1.0, block.scale + dt * 5);
@@ -440,15 +658,18 @@ class BlockBlastGame extends FlameGame with PanDetector {
         block.opacity = min(1.0, block.opacity + dt * 5);
       }
     }
+    
+    _updateHintAvailability();
   }
 
   void continueGame() {
     if (score % 2 == 0) {
-      // Only allow continue if score is even
-      score = score ~/ 2; // Deduct 50% of score
+      score = continueCost;
+      displayScore = continueCost;
       showContinuePrompt = false;
       continuePromptTimer = 5.0;
-      generateBottomBlocks(); // Generate new blocks
+      generateBottomBlocks();
+      _updateHintAvailability();
     }
   }
 
@@ -463,6 +684,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
     hasColorMatchPowerUp = false;
     grid = List.generate(gridSize, (_) => List.filled(gridSize, null));
     generateBottomBlocks();
+    _updateHintAvailability();
   }
 
   @override
@@ -475,9 +697,9 @@ class BlockBlastGame extends FlameGame with PanDetector {
     final bgPaint = Paint()
       ..shader = LinearGradient(
         colors: [
-          const Color(0xFF1A237E), // Deep Indigo
-          const Color(0xFF0D47A1), // Dark Blue
-          const Color(0xFF1A237E), // Deep Indigo
+          const Color(0xFF1A237E),
+          const Color(0xFF0D47A1),
+          const Color(0xFF1A237E),
         ],
         stops: [0.0, (sin(now) + 1) / 2, 1.0],
         begin: Alignment.topLeft,
@@ -486,8 +708,9 @@ class BlockBlastGame extends FlameGame with PanDetector {
     canvas.drawRect(bgRect, bgPaint);
 
     // Add subtle pattern overlay
-    for (int i = 0; i < size.x; i += 20) {
-      for (int j = 0; j < size.y; j += 20) {
+    final patternSize = max(15.0, 20 * smallScaleFactor);
+    for (int i = 0; i < size.x; i += patternSize.toInt()) {
+      for (int j = 0; j < size.y; j += patternSize.toInt()) {
         canvas.drawCircle(
           Offset(i.toDouble(), j.toDouble()),
           1,
@@ -500,8 +723,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
     final gridWidth = gridSize * cellSize + (gridSize - 1) * cellPadding;
     final gridHeight = gridSize * cellSize + (gridSize - 1) * cellPadding;
     final gridLeft = (size.x - gridWidth) / 2;
-    final gridTop =
-        (size.y - gridHeight) / 4; // Position grid at 1/4 of remaining space
+    final gridTop = gridPadding;
 
     // Draw grid background with gradient
     for (int y = 0; y < gridSize; y++) {
@@ -513,27 +735,23 @@ class BlockBlastGame extends FlameGame with PanDetector {
           cellSize,
         );
 
-        // Draw cell background with modern glass effect
         final cellPaint = Paint()..color = Colors.white.withOpacity(0.05);
 
-        // Draw cell border glow
         canvas.drawRRect(
           RRect.fromRectAndRadius(
             cellRect.inflate(1),
-            const Radius.circular(10),
+            Radius.circular(cellSize * 0.2),
           ),
           Paint()
             ..color = Colors.white.withOpacity(0.1)
             ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 2),
         );
 
-        // Draw main cell
         canvas.drawRRect(
-          RRect.fromRectAndRadius(cellRect, const Radius.circular(8)),
+          RRect.fromRectAndRadius(cellRect, Radius.circular(cellSize * 0.16)),
           cellPaint,
         );
 
-        // Draw inner highlight
         canvas.drawRRect(
           RRect.fromRectAndRadius(
             Rect.fromLTWH(
@@ -542,7 +760,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
               cellRect.width - 2,
               cellRect.height - 2,
             ),
-            const Radius.circular(7),
+            Radius.circular(cellSize * 0.14),
           ),
           Paint()..color = Colors.white.withOpacity(0.05),
         );
@@ -553,22 +771,19 @@ class BlockBlastGame extends FlameGame with PanDetector {
             ..color = grid[y][x]!
             ..style = PaintingStyle.fill;
 
-          // Draw block shadow
           canvas.drawRRect(
             RRect.fromRectAndRadius(
               cellRect.translate(2, 2),
-              const Radius.circular(8),
+              Radius.circular(cellSize * 0.16),
             ),
             Paint()..color = Colors.black.withOpacity(0.3),
           );
 
-          // Draw block with rounded corners and gradient
           canvas.drawRRect(
-            RRect.fromRectAndRadius(cellRect, const Radius.circular(8)),
+            RRect.fromRectAndRadius(cellRect, Radius.circular(cellSize * 0.16)),
             blockPaint,
           );
 
-          // Draw highlight
           canvas.drawRRect(
             RRect.fromRectAndRadius(
               Rect.fromLTWH(
@@ -577,7 +792,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
                 cellRect.width - 4,
                 cellRect.height - 4,
               ),
-              const Radius.circular(6),
+              Radius.circular(cellSize * 0.12),
             ),
             Paint()..color = Colors.white.withOpacity(0.2),
           );
@@ -588,12 +803,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
     // Draw preview when dragging
     if (draggingBlock != null && currentGridPosition != null) {
       final (previewX, previewY) = currentGridPosition!;
-
-      // Calculate grid dimensions
       final gridWidth = gridSize * cellSize + (gridSize - 1) * cellPadding;
       final gridLeft = (size.x - gridWidth) / 2;
       final gridHeight = gridSize * cellSize + (gridSize - 1) * cellPadding;
-      final gridTop = (size.y - gridHeight) / 4;
+      final gridTop = gridPadding;
 
       for (int y = 0; y < draggingBlock!.shape.length; y++) {
         for (int x = 0; x < draggingBlock!.shape[y].length; x++) {
@@ -605,34 +818,30 @@ class BlockBlastGame extends FlameGame with PanDetector {
               cellSize,
             );
 
-            // Draw preview cell with glow effect
             final glowPaint = Paint()
               ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8)
               ..color = isValidPosition
                   ? draggingBlock!.color.withOpacity(previewOpacity * 0.5)
                   : Colors.red.withOpacity(previewOpacity * 0.5);
 
-            // Draw main preview shape
             canvas.drawRRect(
-              RRect.fromRectAndRadius(previewRect, const Radius.circular(8)),
+              RRect.fromRectAndRadius(previewRect, Radius.circular(cellSize * 0.16)),
               Paint()
                 ..color = isValidPosition
                     ? draggingBlock!.color.withOpacity(previewOpacity * 0.3)
                     : Colors.red.withOpacity(previewOpacity * 0.3),
             );
 
-            // Draw glow
             canvas.drawRRect(
               RRect.fromRectAndRadius(
                 previewRect.inflate(4),
-                const Radius.circular(10),
+                Radius.circular(cellSize * 0.2),
               ),
               glowPaint,
             );
 
-            // Draw border
             canvas.drawRRect(
-              RRect.fromRectAndRadius(previewRect, const Radius.circular(8)),
+              RRect.fromRectAndRadius(previewRect, Radius.circular(cellSize * 0.16)),
               Paint()
                 ..style = PaintingStyle.stroke
                 ..strokeWidth = 2
@@ -643,6 +852,11 @@ class BlockBlastGame extends FlameGame with PanDetector {
           }
         }
       }
+    }
+
+    // Draw hint if active
+    if (showHint) {
+      _drawHint(canvas);
     }
 
     // Draw bottom blocks with effects
@@ -657,18 +871,16 @@ class BlockBlastGame extends FlameGame with PanDetector {
               cellSize - 2,
             );
 
-            // Draw block glow effect
             canvas.drawRRect(
               RRect.fromRectAndRadius(
                 blockRect.inflate(2),
-                const Radius.circular(10),
+                Radius.circular(cellSize * 0.2),
               ),
               Paint()
                 ..color = block.color.withOpacity(0.3)
                 ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 3),
             );
 
-            // Draw block with gradient
             final gradientColors =
                 blockGradients[block.color] ?? [block.color, block.color];
             final blockPaint = Paint()
@@ -678,13 +890,11 @@ class BlockBlastGame extends FlameGame with PanDetector {
                 end: Alignment.bottomRight,
               ).createShader(blockRect);
 
-            // Draw main block shape
             canvas.drawRRect(
-              RRect.fromRectAndRadius(blockRect, const Radius.circular(8)),
+              RRect.fromRectAndRadius(blockRect, Radius.circular(cellSize * 0.16)),
               blockPaint,
             );
 
-            // Draw inner highlight
             canvas.drawRRect(
               RRect.fromRectAndRadius(
                 Rect.fromLTWH(
@@ -693,7 +903,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
                   blockRect.width - 4,
                   blockRect.height - 4,
                 ),
-                const Radius.circular(6),
+                Radius.circular(cellSize * 0.12),
               ),
               Paint()..color = Colors.white.withOpacity(0.3),
             );
@@ -702,13 +912,26 @@ class BlockBlastGame extends FlameGame with PanDetector {
       }
     }
 
+    // Draw AI feedback if active
+    if (showFeedback && aiFeedback.isNotEmpty) {
+      _drawAiFeedback(canvas);
+    }
+
+    // Responsive UI elements
+    final baseFontSize = 16.0 * scaleFactor;
+    final panelHeight = 40.0 * smallScaleFactor;
+    final panelWidth = 160.0 * smallScaleFactor;
+
     // Draw score panel background
     final scorePanelRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(size.x / 2 - 100, 10, 200, 50),
-      const Radius.circular(25),
+      Rect.fromCenter(
+        center: Offset(size.x / 2, panelHeight / 2 + 10),
+        width: panelWidth,
+        height: panelHeight,
+      ),
+      Radius.circular(panelHeight / 2),
     );
 
-    // Draw score panel glow
     canvas.drawRRect(
       scorePanelRect.inflate(2),
       Paint()
@@ -716,7 +939,6 @@ class BlockBlastGame extends FlameGame with PanDetector {
         ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
     );
 
-    // Draw score panel background
     canvas.drawRRect(
       scorePanelRect,
       Paint()
@@ -730,14 +952,135 @@ class BlockBlastGame extends FlameGame with PanDetector {
         ).createShader(scorePanelRect.outerRect),
     );
 
+    // Draw hint button
+    final hintButtonSize = 50.0 * smallScaleFactor;
+    final hintButtonRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: Offset(hintButtonSize / 2 + 10, panelHeight / 2 + 10),
+        width: hintButtonSize,
+        height: hintButtonSize,
+      ),
+      Radius.circular(hintButtonSize / 2),
+    );
+
+    final hintButtonGlowColor = isHintAvailable 
+        ? Colors.orange[400]!.withOpacity(0.3)
+        : Colors.grey[400]!.withOpacity(0.2);
+
+    canvas.drawRRect(
+      hintButtonRect.inflate(2),
+      Paint()
+        ..color = hintButtonGlowColor
+        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
+    );
+
+    final hintButtonGradient = isHintAvailable
+        ? LinearGradient(
+            colors: [
+              Colors.orange[700]!.withOpacity(0.9),
+              Colors.orange[500]!.withOpacity(0.9),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          )
+        : LinearGradient(
+            colors: [
+              Colors.grey[700]!.withOpacity(0.5),
+              Colors.grey[500]!.withOpacity(0.5),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          );
+
+    canvas.drawRRect(
+      hintButtonRect,
+      Paint()
+        ..shader = hintButtonGradient.createShader(hintButtonRect.outerRect),
+    );
+
+    _drawLampIcon(canvas, hintButtonRect.center, isHintAvailable);
+
+    if (isHintAvailable && hintCost > 0) {
+      final costText = '-$hintCost';
+      final costPainter = TextPainter(
+        text: TextSpan(
+          text: costText,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: baseFontSize * 0.7,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      );
+      costPainter.layout();
+      costPainter.paint(
+        canvas,
+        Offset(
+          hintButtonRect.center.dx - costPainter.width / 2,
+          hintButtonRect.center.dy + hintButtonSize * 0.3,
+        ),
+      );
+    }
+
+    // Draw rules icon button
+    final rulesButtonSize = 50.0 * smallScaleFactor;
+    final rulesButtonRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: Offset(size.x - rulesButtonSize / 2 - 10, panelHeight / 2 + 10),
+        width: rulesButtonSize,
+        height: rulesButtonSize,
+      ),
+      Radius.circular(rulesButtonSize / 2),
+    );
+
+    canvas.drawRRect(
+      rulesButtonRect.inflate(2),
+      Paint()
+        ..color = Colors.green[400]!.withOpacity(0.3)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
+    );
+
+    canvas.drawRRect(
+      rulesButtonRect,
+      Paint()
+        ..shader = LinearGradient(
+          colors: [
+            Colors.green[700]!.withOpacity(0.9),
+            Colors.green[500]!.withOpacity(0.9),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ).createShader(rulesButtonRect.outerRect),
+    );
+
+    final rulesIconPainter = TextPainter(
+      text: TextSpan(
+        text: '?',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: baseFontSize * 1.5,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    rulesIconPainter.layout();
+    rulesIconPainter.paint(
+      canvas,
+      Offset(
+        size.x - rulesButtonSize / 2 - 10 - rulesIconPainter.width / 2,
+        panelHeight / 2 + 10 - rulesIconPainter.height / 2,
+      ),
+    );
+
     // Draw power-up indicators
     if (hasExplosivePowerUp || hasColorMatchPowerUp) {
       final powerUpRect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(10, 10, 160, 50),
-        const Radius.circular(25),
+        Rect.fromLTWH(size.x / 2 - panelWidth - 60, 10, panelWidth, panelHeight),
+        Radius.circular(panelHeight / 2),
       );
 
-      // Draw power-up panel background with glow
       canvas.drawRRect(
         powerUpRect.inflate(2),
         Paint()
@@ -758,18 +1101,17 @@ class BlockBlastGame extends FlameGame with PanDetector {
           ).createShader(powerUpRect.outerRect),
       );
 
-      // Draw power-up icons and text
-      final iconSize = 30.0;
-      var xOffset = 20.0;
+      final iconSize = 20.0 * smallScaleFactor;
+      var xOffset = size.x / 2 - panelWidth - 50;
 
       if (hasExplosivePowerUp) {
         canvas.drawCircle(
-          Offset(xOffset + iconSize / 2, 35),
+          Offset(xOffset + iconSize / 2, 10 + panelHeight / 2),
           iconSize / 2,
           Paint()..color = Colors.orange,
         );
         canvas.drawCircle(
-          Offset(xOffset + iconSize / 2, 35),
+          Offset(xOffset + iconSize / 2, 10 + panelHeight / 2),
           iconSize / 4,
           Paint()..color = Colors.red,
         );
@@ -779,7 +1121,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
       if (hasColorMatchPowerUp) {
         for (int i = 0; i < 3; i++) {
           canvas.drawCircle(
-            Offset(xOffset + i * 10, 35),
+            Offset(xOffset + i * 8 * smallScaleFactor, 10 + panelHeight / 2),
             iconSize / 4,
             Paint()..color = blockColors[i],
           );
@@ -795,7 +1137,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
           text: multiplierText,
           style: TextStyle(
             color: Colors.orange,
-            fontSize: 24,
+            fontSize: baseFontSize * 1.2,
             fontWeight: FontWeight.bold,
             shadows: [
               Shadow(
@@ -809,17 +1151,23 @@ class BlockBlastGame extends FlameGame with PanDetector {
         textDirection: TextDirection.ltr,
       );
       multiplierPainter.layout();
-      multiplierPainter.paint(canvas, Offset(size.x / 2 + 110, 20));
+      multiplierPainter.paint(
+        canvas, 
+        Offset(
+          size.x / 2 + panelWidth / 2 + 10,
+          10 + (panelHeight - multiplierPainter.height) / 2,
+        ),
+      );
     }
 
-    // Draw score text with glow effect
+    // Draw score text
     final scoreText = 'Score: $displayScore';
     final textPainter = TextPainter(
       text: TextSpan(
         text: scoreText,
         style: TextStyle(
           color: Colors.white,
-          fontSize: 32,
+          fontSize: baseFontSize * 1.5,
           fontWeight: FontWeight.bold,
           shadows: [
             Shadow(
@@ -839,209 +1187,267 @@ class BlockBlastGame extends FlameGame with PanDetector {
     );
     textPainter.layout();
 
-    // Center the score text in the panel
     final textX = size.x / 2 - textPainter.width / 2;
-    final textY = 20.0; // Fixed the int to double conversion
+    final textY = 10 + (panelHeight - textPainter.height) / 2;
     textPainter.paint(canvas, Offset(textX, textY));
 
     // Draw continue prompt if needed
     if (showContinuePrompt) {
-      // Draw semi-transparent overlay
-      canvas.drawRect(
-        Rect.fromLTWH(0, 0, size.x, size.y),
-        Paint()..color = Colors.black.withOpacity(0.7),
-      );
-
-      // Draw prompt panel
-      final promptRect = RRect.fromRectAndRadius(
-        Rect.fromCenter(
-          center: Offset(size.x / 2, size.y / 2),
-          width: 400,
-          height: 200,
-        ),
-        const Radius.circular(20),
-      );
-
-      // Draw panel background with glow
-      canvas.drawRRect(
-        promptRect.inflate(4),
-        Paint()
-          ..color = Colors.blue[400]!.withOpacity(0.3)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8),
-      );
-
-      canvas.drawRRect(
-        promptRect,
-        Paint()
-          ..shader = LinearGradient(
-            colors: [
-              Colors.blue[900]!.withOpacity(0.9),
-              Colors.blue[700]!.withOpacity(0.9),
-            ],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ).createShader(promptRect.outerRect),
-      );
-
-      // Draw prompt text and buttons
-      if (score % 2 == 0) {
-        // Draw prompt text
-        final promptText =
-            'Continue game for ${score ~/ 2} points?\nTime remaining: ${continuePromptTimer.toStringAsFixed(1)}s';
-        final promptPainter = TextPainter(
-          text: TextSpan(
-            text: promptText,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          textAlign: TextAlign.center,
-          textDirection: TextDirection.ltr,
-        );
-        promptPainter.layout(maxWidth: 360);
-        promptPainter.paint(
-          canvas,
-          Offset(
-            size.x / 2 - promptPainter.width / 2,
-            size.y / 2 - promptPainter.height - 40,
-          ),
-        );
-
-        // Draw Yes/No buttons
-        final buttonWidth = 120.0;
-        final buttonHeight = 50.0;
-
-        // Yes button
-        final yesRect = RRect.fromRectAndRadius(
-          Rect.fromCenter(
-            center: Offset(size.x / 2 - 80, size.y / 2 + 40),
-            width: buttonWidth,
-            height: buttonHeight,
-          ),
-          const Radius.circular(25),
-        );
-
-        // Draw yes button with glow
-        canvas.drawRRect(
-          yesRect.inflate(2),
-          Paint()
-            ..color = Colors.green[400]!.withOpacity(0.3)
-            ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
-        );
-
-        canvas.drawRRect(
-          yesRect,
-          Paint()
-            ..shader = LinearGradient(
-              colors: [
-                Colors.green[700]!.withOpacity(0.9),
-                Colors.green[500]!.withOpacity(0.9),
-              ],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ).createShader(yesRect.outerRect),
-        );
-
-        // No button
-        final noRect = RRect.fromRectAndRadius(
-          Rect.fromCenter(
-            center: Offset(size.x / 2 + 80, size.y / 2 + 40),
-            width: buttonWidth,
-            height: buttonHeight,
-          ),
-          const Radius.circular(25),
-        );
-
-        // Draw no button with glow
-        canvas.drawRRect(
-          noRect.inflate(2),
-          Paint()
-            ..color = Colors.red[400]!.withOpacity(0.3)
-            ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
-        );
-
-        canvas.drawRRect(
-          noRect,
-          Paint()
-            ..shader = LinearGradient(
-              colors: [
-                Colors.red[700]!.withOpacity(0.9),
-                Colors.red[500]!.withOpacity(0.9),
-              ],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ).createShader(noRect.outerRect),
-        );
-
-        // Draw button text
-        final yesPainter = TextPainter(
-          text: const TextSpan(
-            text: 'Yes',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          textDirection: TextDirection.ltr,
-        );
-        yesPainter.layout();
-        yesPainter.paint(
-          canvas,
-          Offset(
-            size.x / 2 - 80 - yesPainter.width / 2,
-            size.y / 2 + 40 - yesPainter.height / 2,
-          ),
-        );
-
-        final noPainter = TextPainter(
-          text: const TextSpan(
-            text: 'No',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          textDirection: TextDirection.ltr,
-        );
-        noPainter.layout();
-        noPainter.paint(
-          canvas,
-          Offset(
-            size.x / 2 + 80 - noPainter.width / 2,
-            size.y / 2 + 40 - noPainter.height / 2,
-          ),
-        );
-      } else {
-        final promptText = 'Cannot continue with odd score: $score\nGame Over!';
-        final promptPainter = TextPainter(
-          text: TextSpan(
-            text: promptText,
-            style: const TextStyle(
-              color: Colors.redAccent,
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          textAlign: TextAlign.center,
-          textDirection: TextDirection.ltr,
-        );
-        promptPainter.layout(maxWidth: 360);
-        promptPainter.paint(
-          canvas,
-          Offset(
-            size.x / 2 - promptPainter.width / 2,
-            size.y / 2 - promptPainter.height / 2,
-          ),
-        );
-      }
+      _drawContinuePrompt(canvas, baseFontSize);
     }
   }
 
-  // Drag & Drop handling for blocks
+  void _drawLampIcon(Canvas canvas, Offset center, bool isActive) {
+    final iconSize = 20.0 * smallScaleFactor;
+    final iconColor = isActive ? Colors.yellow : Colors.grey;
+    
+    final bulbPaint = Paint()
+      ..color = iconColor
+      ..style = PaintingStyle.fill;
+    
+    canvas.drawCircle(center, iconSize * 0.4, bulbPaint);
+    
+    if (isActive) {
+      final rayPaint = Paint()
+        ..color = Colors.yellow.withOpacity(0.3)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5;
+      
+      for (int i = 0; i < 4; i++) {
+        final angle = i * pi / 2;
+        final start = center;
+        final end = center + Offset(cos(angle), sin(angle)) * iconSize * 0.8;
+        canvas.drawLine(start, end, rayPaint);
+      }
+    }
+    
+    final standPaint = Paint()
+      ..color = iconColor
+      ..style = PaintingStyle.fill;
+    
+    final standRect = Rect.fromCenter(
+      center: Offset(center.dx, center.dy + iconSize * 0.3),
+      width: iconSize * 0.3,
+      height: iconSize * 0.4,
+    );
+    
+    canvas.drawRect(standRect, standPaint);
+  }
+
+  void _drawAiFeedback(Canvas canvas) {
+    final feedbackPainter = TextPainter(
+      text: TextSpan(
+        text: aiFeedback,
+        style: TextStyle(
+          color: feedbackColor.withOpacity(feedbackOpacity),
+          fontSize: 20.0 * scaleFactor,
+          fontWeight: FontWeight.bold,
+          shadows: [
+            Shadow(
+              blurRadius: 8,
+              color: Colors.black.withOpacity(0.7),
+              offset: const Offset(0, 0),
+            ),
+          ],
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    feedbackPainter.layout();
+    
+    final feedbackX = size.x / 2 - feedbackPainter.width / 2;
+    final feedbackY = size.y / 2 - 50;
+    
+    feedbackPainter.paint(canvas, Offset(feedbackX, feedbackY));
+  }
+
+  void _drawContinuePrompt(Canvas canvas, double baseFontSize) {
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, size.x, size.y),
+      Paint()..color = Colors.black.withOpacity(0.7),
+    );
+
+    final promptWidth = min(400.0, size.x * 0.8);
+    final promptHeight = min(200.0, size.y * 0.3);
+
+    final promptRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: Offset(size.x / 2, size.y / 2),
+        width: promptWidth,
+        height: promptHeight,
+      ),
+      Radius.circular(promptHeight * 0.1),
+    );
+
+    canvas.drawRRect(
+      promptRect.inflate(4),
+      Paint()
+        ..color = Colors.blue[400]!.withOpacity(0.3)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8),
+    );
+
+    canvas.drawRRect(
+      promptRect,
+      Paint()
+        ..shader = LinearGradient(
+          colors: [
+            Colors.blue[900]!.withOpacity(0.9),
+            Colors.blue[700]!.withOpacity(0.9),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ).createShader(promptRect.outerRect),
+    );
+
+    final promptFontSize = min(24.0, baseFontSize * 1.2);
+    if (score % 2 == 0) {
+      final promptText =
+          'Continue game for $continueCost points?\nTime remaining: ${continuePromptTimer.toStringAsFixed(1)}s';
+      final promptPainter = TextPainter(
+        text: TextSpan(
+          text: promptText,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: promptFontSize,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textAlign: TextAlign.center,
+        textDirection: TextDirection.ltr,
+      );
+      promptPainter.layout(maxWidth: promptWidth - 40);
+      promptPainter.paint(
+        canvas,
+        Offset(
+          size.x / 2 - promptPainter.width / 2,
+          size.y / 2 - promptPainter.height - promptHeight * 0.2,
+        ),
+      );
+
+      final buttonWidth = min(120.0, promptWidth * 0.3);
+      final buttonHeight = min(50.0, promptHeight * 0.25);
+
+      final yesRect = RRect.fromRectAndRadius(
+        Rect.fromCenter(
+          center: Offset(size.x / 2 - buttonWidth * 0.8, size.y / 2 + promptHeight * 0.2),
+          width: buttonWidth,
+          height: buttonHeight,
+        ),
+        Radius.circular(buttonHeight / 2),
+      );
+
+      canvas.drawRRect(
+        yesRect.inflate(2),
+        Paint()
+          ..color = Colors.green[400]!.withOpacity(0.3)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
+      );
+
+      canvas.drawRRect(
+        yesRect,
+        Paint()
+          ..shader = LinearGradient(
+            colors: [
+              Colors.green[700]!.withOpacity(0.9),
+              Colors.green[500]!.withOpacity(0.9),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ).createShader(yesRect.outerRect),
+      );
+
+      final noRect = RRect.fromRectAndRadius(
+        Rect.fromCenter(
+          center: Offset(size.x / 2 + buttonWidth * 0.8, size.y / 2 + promptHeight * 0.2),
+          width: buttonWidth,
+          height: buttonHeight,
+        ),
+        Radius.circular(buttonHeight / 2),
+      );
+
+      canvas.drawRRect(
+        noRect.inflate(2),
+        Paint()
+          ..color = Colors.red[400]!.withOpacity(0.3)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
+      );
+
+      canvas.drawRRect(
+        noRect,
+        Paint()
+          ..shader = LinearGradient(
+            colors: [
+              Colors.red[700]!.withOpacity(0.9),
+              Colors.red[500]!.withOpacity(0.9),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ).createShader(noRect.outerRect),
+      );
+
+      final yesPainter = TextPainter(
+        text: const TextSpan(
+          text: 'Yes',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      );
+      yesPainter.layout();
+      yesPainter.paint(
+        canvas,
+        Offset(
+          size.x / 2 - buttonWidth * 0.8 - yesPainter.width / 2,
+          size.y / 2 + promptHeight * 0.2 - yesPainter.height / 2,
+        ),
+      );
+
+      final noPainter = TextPainter(
+        text: const TextSpan(
+          text: 'No',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      );
+      noPainter.layout();
+      noPainter.paint(
+        canvas,
+        Offset(
+          size.x / 2 + buttonWidth * 0.8 - noPainter.width / 2,
+          size.y / 2 + promptHeight * 0.2 - noPainter.height / 2,
+        ),
+      );
+    } else {
+      final promptText = 'Cannot continue with odd score: $score\nGame Over!';
+      final promptPainter = TextPainter(
+        text: TextSpan(
+          text: promptText,
+          style: TextStyle(
+            color: Colors.redAccent,
+            fontSize: promptFontSize,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textAlign: TextAlign.center,
+        textDirection: TextDirection.ltr,
+      );
+      promptPainter.layout(maxWidth: promptWidth - 40);
+      promptPainter.paint(
+        canvas,
+        Offset(
+          size.x / 2 - promptPainter.width / 2,
+          size.y / 2 - promptPainter.height / 2,
+        ),
+      );
+    }
+  }
 
   @override
   void onPanUpdate(DragUpdateInfo info) {
@@ -1051,32 +1457,24 @@ class BlockBlastGame extends FlameGame with PanDetector {
         info.delta.global.y,
       );
 
-      // Calculate current grid position
       final blockCenter = Offset(
-        draggingBlock!.position.dx +
-            (draggingBlock!.shape[0].length * cellSize) / 2,
-        draggingBlock!.position.dy +
-            (draggingBlock!.shape.length * cellSize) / 2,
+        draggingBlock!.position.dx + (draggingBlock!.shape[0].length * cellSize) / 2,
+        draggingBlock!.position.dy + (draggingBlock!.shape.length * cellSize) / 2,
       );
 
       final gridPos = getGridPosition(blockCenter);
       if (gridPos != null) {
         final (startX, startY) = gridPos;
-
-        // Adjust position based on block size
         final adjustedX = (startX - draggingBlock!.shape[0].length ~/ 2).clamp(
-          0,
-          gridSize - draggingBlock!.shape[0].length,
+          0, gridSize - draggingBlock!.shape[0].length,
         );
         final adjustedY = (startY - draggingBlock!.shape.length ~/ 2).clamp(
-          0,
-          gridSize - draggingBlock!.shape.length,
+          0, gridSize - draggingBlock!.shape.length,
         );
 
         currentGridPosition = (adjustedX, adjustedY);
         isValidPosition = canPlace(draggingBlock!.shape, adjustedX, adjustedY);
 
-        // Animate preview opacity based on validity
         if (isValidPosition) {
           previewOpacity = min(0.5, previewOpacity + 0.1);
         } else {
@@ -1089,14 +1487,12 @@ class BlockBlastGame extends FlameGame with PanDetector {
     }
   }
 
-  // Helper method to convert screen position to grid position
   (int, int)? getGridPosition(Offset position) {
     final gridWidth = gridSize * cellSize + (gridSize - 1) * cellPadding;
     final gridLeft = (size.x - gridWidth) / 2;
     final gridHeight = gridSize * cellSize + (gridSize - 1) * cellPadding;
-    final gridTop = (size.y - gridHeight) / 4;
+    final gridTop = gridPadding;
 
-    // Check if position is within grid bounds
     if (position.dx < gridLeft ||
         position.dx > gridLeft + gridWidth ||
         position.dy < gridTop ||
@@ -1104,11 +1500,9 @@ class BlockBlastGame extends FlameGame with PanDetector {
       return null;
     }
 
-    // Calculate grid coordinates
     int x = ((position.dx - gridLeft) / (cellSize + cellPadding)).floor();
     int y = ((position.dy - gridTop) / (cellSize + cellPadding)).floor();
 
-    // Ensure coordinates are within grid bounds
     if (x >= 0 && x < gridSize && y >= 0 && y < gridSize) {
       return (x, y);
     }
@@ -1122,17 +1516,17 @@ class BlockBlastGame extends FlameGame with PanDetector {
       final touchY = info.eventPosition.global.y;
 
       if (score % 2 == 0) {
-        // Define button rectangles
+        final buttonWidth = min(120.0, size.x * 0.3);
         final yesButtonRect = Rect.fromCenter(
-          center: Offset(size.x / 2 - 80, size.y / 2 + 40),
-          width: 120,
-          height: 50,
+          center: Offset(size.x / 2 - buttonWidth * 0.8, size.y / 2 + (min(200.0, size.y * 0.3)) * 0.2),
+          width: buttonWidth,
+          height: min(50.0, size.y * 0.08),
         );
 
         final noButtonRect = Rect.fromCenter(
-          center: Offset(size.x / 2 + 80, size.y / 2 + 40),
-          width: 120,
-          height: 50,
+          center: Offset(size.x / 2 + buttonWidth * 0.8, size.y / 2 + (min(200.0, size.y * 0.3)) * 0.2),
+          width: buttonWidth,
+          height: min(50.0, size.y * 0.08),
         );
 
         if (yesButtonRect.contains(Offset(touchX, touchY))) {
@@ -1141,7 +1535,6 @@ class BlockBlastGame extends FlameGame with PanDetector {
           startNewGame();
         }
       } else {
-        // For odd scores, any tap starts a new game
         startNewGame();
       }
       return;
@@ -1151,6 +1544,32 @@ class BlockBlastGame extends FlameGame with PanDetector {
       info.eventPosition.global.x,
       info.eventPosition.global.y,
     );
+
+    // Check if hint button was tapped
+    final hintButtonSize = 50.0 * smallScaleFactor;
+    final hintButtonRect = Rect.fromCenter(
+      center: Offset(hintButtonSize / 2 + 10, (40.0 * smallScaleFactor) / 2 + 10),
+      width: hintButtonSize,
+      height: hintButtonSize,
+    );
+    
+    if (hintButtonRect.contains(touch) && isHintAvailable) {
+      activateHint();
+      return;
+    }
+
+    // Check if rules icon button was tapped
+    final rulesButtonSize = 50.0 * smallScaleFactor;
+    final rulesButtonRect = Rect.fromCenter(
+      center: Offset(size.x - rulesButtonSize / 2 - 10, (40.0 * smallScaleFactor) / 2 + 10),
+      width: rulesButtonSize,
+      height: rulesButtonSize,
+    );
+    if (rulesButtonRect.contains(touch)) {
+      overlays.add('rules');
+      return;
+    }
+
     for (var block in bottomBlocks) {
       Rect blockRect = Rect.fromLTWH(
         block.position.dx,
@@ -1171,67 +1590,44 @@ class BlockBlastGame extends FlameGame with PanDetector {
   @override
   void onPanEnd(DragEndInfo info) {
     if (draggingBlock != null) {
-      // Get the center position of the dragged block
       final blockCenter = Offset(
-        draggingBlock!.position.dx +
-            (draggingBlock!.shape[0].length * cellSize) / 2,
-        draggingBlock!.position.dy +
-            (draggingBlock!.shape.length * cellSize) / 2,
+        draggingBlock!.position.dx + (draggingBlock!.shape[0].length * cellSize) / 2,
+        draggingBlock!.position.dy + (draggingBlock!.shape.length * cellSize) / 2,
       );
 
-      // Convert screen position to grid position
       final gridPos = getGridPosition(blockCenter);
 
       if (gridPos != null) {
         final (startX, startY) = gridPos;
-
-        // Adjust position based on block size
         final adjustedX = (startX - draggingBlock!.shape[0].length ~/ 2).clamp(
-          0,
-          gridSize - draggingBlock!.shape[0].length,
+          0, gridSize - draggingBlock!.shape[0].length,
         );
         final adjustedY = (startY - draggingBlock!.shape.length ~/ 2).clamp(
-          0,
-          gridSize - draggingBlock!.shape.length,
+          0, gridSize - draggingBlock!.shape.length,
         );
 
         if (canPlace(draggingBlock!.shape, adjustedX, adjustedY)) {
+          _analyzeMove(draggingBlock!, adjustedX, adjustedY);
           placeBlock(draggingBlock!.shape, adjustedX, adjustedY);
-          // Add 5 points for successful block placement
           score += 5;
           checkFullLines();
 
-          // Remove the placed block from bottomBlocks
           bottomBlocks.removeWhere((block) => block == draggingBlock);
           placedBlockCount++;
 
-          // Only generate new blocks when all three have been placed
           if (placedBlockCount >= 3) {
             generateBottomBlocks();
           }
         } else {
-          // Return block to original position if can't place
           final index = bottomBlocks.indexOf(draggingBlock!);
           if (index != -1) {
-            double startX =
-                (size.x - (bottomBlocks.length * (cellSize * 3 + cellSize))) /
-                2;
-            draggingBlock!.position = Offset(
-              startX + index * (cellSize * 3 + cellSize),
-              bottomBlocksY,
-            );
+            _positionBottomBlocks();
           }
         }
       } else {
-        // Return block to original position if outside grid
         final index = bottomBlocks.indexOf(draggingBlock!);
         if (index != -1) {
-          double startX =
-              (size.x - (bottomBlocks.length * (cellSize * 3 + cellSize))) / 2;
-          draggingBlock!.position = Offset(
-            startX + index * (cellSize * 3 + cellSize),
-            bottomBlocksY,
-          );
+          _positionBottomBlocks();
         }
       }
 
@@ -1241,7 +1637,6 @@ class BlockBlastGame extends FlameGame with PanDetector {
   }
 
   bool canPlace(List<List<int>> shape, int startX, int startY) {
-    // Check if the entire shape is within grid bounds
     if (startX < 0 ||
         startY < 0 ||
         startX + shape[0].length > gridSize ||
@@ -1249,7 +1644,6 @@ class BlockBlastGame extends FlameGame with PanDetector {
       return false;
     }
 
-    // Check if all cells needed are empty
     for (int y = 0; y < shape.length; y++) {
       for (int x = 0; x < shape[y].length; x++) {
         if (shape[y][x] == 1) {
@@ -1270,11 +1664,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
     for (int y = 0; y < shape.length; y++) {
       for (int x = 0; x < shape[y].length; x++) {
         if (shape[y][x] == 1) {
-          // Add placement effect
           final gridWidth = gridSize * cellSize + (gridSize - 1) * cellPadding;
           final gridLeft = (size.x - gridWidth) / 2;
           final gridHeight = gridSize * cellSize + (gridSize - 1) * cellPadding;
-          final gridTop = (size.y - gridHeight) / 4;
+          final gridTop = gridPadding;
 
           final effectPosition = Offset(
             gridLeft + (startX + x) * (cellSize + cellPadding),
@@ -1293,25 +1686,167 @@ class BlockBlastGame extends FlameGame with PanDetector {
       }
     }
 
-    // Animate score increase
     scoreAnimationScale = 1.5;
     lastScoreColor = draggingBlock!.color;
   }
 
-  // Score multiplier for consecutive successful placements
-  double scoreMultiplier = 1.0;
-  int consecutivePlacements = 0;
+  void checkFullLines() {
+    int completedRows = 0;
+    int completedColumns = 0;
+    int completedSquares = 0;
 
-  // Time tracking for quick placement bonus
-  DateTime? lastPlacementTime;
+    checkPatterns();
 
-  // Power-up tracking
-  bool hasExplosivePowerUp = false;
-  bool hasColorMatchPowerUp = false;
+    for (int y = 0; y < gridSize - 2; y++) {
+      for (int x = 0; x < gridSize - 2; x++) {
+        bool isFullSquare = true;
+        Color? firstColor = grid[y][x];
+        if (firstColor == null) continue;
 
-  // Check for special patterns
+        for (int dy = 0; dy < 3; dy++) {
+          for (int dx = 0; dx < 3; dx++) {
+            if (grid[y + dy][x + dx] != firstColor) {
+              isFullSquare = false;
+              break;
+            }
+          }
+          if (!isFullSquare) break;
+        }
+
+        if (isFullSquare) {
+          for (int dy = 0; dy < 3; dy++) {
+            for (int dx = 0; dx < 3; dx++) {
+              grid[y + dy][x + dx] = null;
+              cellClearEffects.add((
+                row: y + dy,
+                col: x + dx,
+                scale: 1.0,
+                opacity: 1.0,
+              ));
+            }
+          }
+          completedSquares++;
+
+          if (Random().nextBool()) {
+            hasExplosivePowerUp = true;
+          } else {
+            hasColorMatchPowerUp = true;
+          }
+        }
+      }
+    }
+
+    for (int y = 0; y < gridSize; y++) {
+      if (grid[y].every((cell) => cell != null)) {
+        completedRows++;
+        _playGoodSound();
+        
+        for (int x = 0; x < gridSize; x++) {
+          final color = grid[y][x]!;
+          cellClearEffects.add((row: y, col: x, scale: 1.0, opacity: 1.0));
+
+          for (int i = 0; i < 3; i++) {
+            final spark = (
+              row: (y + (Random().nextDouble() - 0.5) * 0.5).round(),
+              col: (x + (Random().nextDouble() - 0.5) * 0.5).round(),
+              scale: 0.3,
+              opacity: 1.0,
+            );
+            cellClearEffects.add(spark);
+          }
+
+          blockPlacementEffects.add((
+            position: Offset(
+              (size.x - gridSize * cellSize) / 2 + x * (cellSize + cellPadding),
+              gridPadding + y * (cellSize + cellPadding),
+            ),
+            color: color,
+            scale: 1.5,
+            opacity: 0.8,
+          ));
+        }
+
+        Future.delayed(const Duration(milliseconds: 200), () {
+          grid[y] = List.filled(gridSize, null);
+        });
+      }
+    }
+
+    for (int x = 0; x < gridSize; x++) {
+      bool fullCol = true;
+      for (int y = 0; y < gridSize; y++) {
+        if (grid[y][x] == null) {
+          fullCol = false;
+          break;
+        }
+      }
+
+      if (fullCol) {
+        completedColumns++;
+        _playGoodSound();
+        
+        for (int y = 0; y < gridSize; y++) {
+          final color = grid[y][x]!;
+          cellClearEffects.add((row: y, col: x, scale: 1.0, opacity: 1.0));
+
+          for (int i = 0; i < 3; i++) {
+            final spark = (
+              row: (y + (Random().nextDouble() - 0.5) * 0.5).round(),
+              col: (x + (Random().nextDouble() - 0.5) * 0.5).round(),
+              scale: 0.3,
+              opacity: 1.0,
+            );
+            cellClearEffects.add(spark);
+          }
+
+          blockPlacementEffects.add((
+            position: Offset(
+              (size.x - gridSize * cellSize) / 2 + x * (cellSize + cellPadding),
+              gridPadding + y * (cellSize + cellPadding),
+            ),
+            color: color,
+            scale: 1.5,
+            opacity: 0.8,
+          ));
+        }
+
+        Future.delayed(const Duration(milliseconds: 200), () {
+          for (int y = 0; y < gridSize; y++) {
+            grid[y][x] = null;
+          }
+        });
+      }
+    }
+
+    int totalClears = completedRows + completedColumns + completedSquares;
+    double chainBonus = totalClears > 1 ? totalClears * 0.5 : 1.0;
+
+    double timeBonus = 1.0;
+    if (lastPlacementTime != null) {
+      final timeDiff = DateTime.now().difference(lastPlacementTime!).inSeconds;
+      if (timeDiff < 3) {
+        timeBonus = 1.5;
+      }
+    }
+    lastPlacementTime = DateTime.now();
+
+    if (totalClears > 0) {
+      consecutivePlacements++;
+      scoreMultiplier = min(3.0, 1.0 + (consecutivePlacements * 0.2));
+    } else {
+      consecutivePlacements = 0;
+      scoreMultiplier = 1.0;
+    }
+
+    int baseScore = (completedRows + completedColumns) * 20 + completedSquares * 50;
+    int finalScore = (baseScore * chainBonus * timeBonus * scoreMultiplier).round();
+
+    if (finalScore > 0) {
+      score += finalScore;
+    }
+  }
+
   void checkPatterns() {
-    // Check for rainbow pattern (all different colors in line)
     for (int y = 0; y < gridSize; y++) {
       Set<Color> colors = {};
       for (int x = 0; x < gridSize; x++) {
@@ -1321,19 +1856,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
       }
       if (colors.length == gridSize) {
         hasRainbowPattern = true;
-        score += 100; // Bonus for rainbow pattern
-        showFloatingText(
-          "Rainbow Pattern! +100",
-          Color.lerp(
-            Colors.red,
-            Colors.blue,
-            sin(DateTime.now().millisecondsSinceEpoch / 500),
-          )!,
-        );
+        score += 100;
       }
     }
 
-    // Check for frame pattern
     bool isFrame = true;
     for (int i = 0; i < gridSize; i++) {
       if (grid[0][i] == null ||
@@ -1346,11 +1872,9 @@ class BlockBlastGame extends FlameGame with PanDetector {
     }
     if (isFrame) {
       hasFramePattern = true;
-      score += 150; // Bonus for frame pattern
-      showFloatingText("Frame Complete! +150", Colors.amber);
+      score += 150;
     }
 
-    // Check for diagonal line
     bool hasDiagonal = true;
     for (int i = 0; i < gridSize; i++) {
       if (grid[i][i] == null) {
@@ -1360,238 +1884,18 @@ class BlockBlastGame extends FlameGame with PanDetector {
     }
     if (hasDiagonal) {
       hasDiagonalLine = true;
-      score += 200; // Bonus for diagonal line
-      showFloatingText("Diagonal Line! +200", Colors.purple);
+      score += 200;
     }
   }
 
-  void checkFullLines() {
-    int completedRows = 0;
-    int completedColumns = 0;
-    int completedSquares = 0; // For 3x3 square patterns
-
-    // Check for special patterns first
-    checkPatterns();
-
-    // Wave animation offset for line clear effects
-    final now = DateTime.now().millisecondsSinceEpoch / 300.0;
-
-    // Check for special 3x3 square patterns
-    for (int y = 0; y < gridSize - 2; y++) {
-      for (int x = 0; x < gridSize - 2; x++) {
-        bool isFullSquare = true;
-        Color? firstColor = grid[y][x];
-        if (firstColor == null) continue;
-
-        // Check if all cells in 3x3 square are filled and match color
-        for (int dy = 0; dy < 3; dy++) {
-          for (int dx = 0; dx < 3; dx++) {
-            if (grid[y + dy][x + dx] != firstColor) {
-              isFullSquare = false;
-              break;
-            }
-          }
-          if (!isFullSquare) break;
-        }
-
-        if (isFullSquare) {
-          // Clear the square and grant power-up
-          for (int dy = 0; dy < 3; dy++) {
-            for (int dx = 0; dx < 3; dx++) {
-              grid[y + dy][x + dx] = null;
-
-              // Add clear effect
-              cellClearEffects.add((
-                row: y + dy,
-                col: x + dx,
-                scale: 1.0,
-                opacity: 1.0,
-              ));
-            }
-          }
-          completedSquares++;
-
-          // Grant power-up for completing a square
-          if (Random().nextBool()) {
-            hasExplosivePowerUp = true;
-          } else {
-            hasColorMatchPowerUp = true;
-          }
-        }
-      }
-    }
-
-    // Store colors before clearing for effects
-
-    List<Color> rowColors = [];
-    List<Color> colColors = [];
-
-    // Check rows
-    for (int y = 0; y < gridSize; y++) {
-      if (grid[y].every((cell) => cell != null)) {
-        // Store colors before clearing
-        rowColors = List.from(
-          grid[y].where((color) => color != null).cast<Color>(),
-        );
-
-        // Add wave effect particles
-        for (int x = 0; x < gridSize; x++) {
-          final color = grid[y][x]!;
-          cellClearEffects.add((row: y, col: x, scale: 1.0, opacity: 1.0));
-
-          // Add sparks
-          for (int i = 0; i < 3; i++) {
-            final spark = (
-              row: (y + (Random().nextDouble() - 0.5) * 0.5).round(),
-              col: (x + (Random().nextDouble() - 0.5) * 0.5).round(),
-              scale: 0.3,
-              opacity: 1.0,
-            );
-            cellClearEffects.add(spark);
-          }
-
-          // Add glow effect
-          blockPlacementEffects.add((
-            position: Offset(
-              (size.x - gridSize * cellSize) / 2 + x * (cellSize + cellPadding),
-              (size.y - gridSize * cellSize) / 4 + y * (cellSize + cellPadding),
-            ),
-            color: color,
-            scale: 1.5,
-            opacity: 0.8,
-          ));
-        }
-
-        // Clear row with delay for wave effect
-        Future.delayed(const Duration(milliseconds: 200), () {
-          grid[y] = List.filled(gridSize, null);
-        });
-
-        completedRows++;
-      }
-    }
-
-    // Check columns
-    for (int x = 0; x < gridSize; x++) {
-      bool fullCol = true;
-      Color? firstColor;
-      for (int y = 0; y < gridSize; y++) {
-        if (grid[y][x] == null) {
-          fullCol = false;
-          break;
-        }
-        if (firstColor == null) firstColor = grid[y][x];
-        colColors.add(grid[y][x]!);
-      }
-
-      if (fullCol) {
-        // Add column clear effects
-        for (int y = 0; y < gridSize; y++) {
-          final color = grid[y][x]!;
-          cellClearEffects.add((row: y, col: x, scale: 1.0, opacity: 1.0));
-
-          // Add vertical spark effects
-          for (int i = 0; i < 3; i++) {
-            final spark = (
-              row: (y + (Random().nextDouble() - 0.5) * 0.5).round(),
-              col: (x + (Random().nextDouble() - 0.5) * 0.5).round(),
-              scale: 0.3,
-              opacity: 1.0,
-            );
-            cellClearEffects.add(spark);
-          }
-
-          // Add glow trail
-          blockPlacementEffects.add((
-            position: Offset(
-              (size.x - gridSize * cellSize) / 2 + x * (cellSize + cellPadding),
-              (size.y - gridSize * cellSize) / 4 + y * (cellSize + cellPadding),
-            ),
-            color: color,
-            scale: 1.5,
-            opacity: 0.8,
-          ));
-        }
-
-        // Clear column with delay for cascade effect
-        Future.delayed(const Duration(milliseconds: 200), () {
-          for (int y = 0; y < gridSize; y++) {
-            grid[y][x] = null;
-          }
-        });
-
-        completedColumns++;
-      }
-    }
-
-    // Calculate chain reaction bonus
-    int totalClears = completedRows + completedColumns + completedSquares;
-    double chainBonus = totalClears > 1
-        ? totalClears * 0.5
-        : 1.0; // 50% bonus per additional clear
-
-    // Calculate time bonus
-    double timeBonus = 1.0;
-    if (lastPlacementTime != null) {
-      final timeDiff = DateTime.now().difference(lastPlacementTime!).inSeconds;
-      if (timeDiff < 3) {
-        // Quick placement bonus if under 3 seconds
-        timeBonus = 1.5;
-      }
-    }
-    lastPlacementTime = DateTime.now();
-
-    // Update score multiplier for consecutive placements
-    if (totalClears > 0) {
-      consecutivePlacements++;
-      scoreMultiplier = min(
-        3.0,
-        1.0 + (consecutivePlacements * 0.2),
-      ); // Max 3x multiplier
-    } else {
-      consecutivePlacements = 0;
-      scoreMultiplier = 1.0;
-    }
-
-    // Calculate final score with all bonuses
-    int baseScore =
-        (completedRows + completedColumns) *
-            20 // Base score for lines
-            +
-        completedSquares * 50; // Extra points for squares
-
-    // Apply all multipliers
-    int finalScore = (baseScore * chainBonus * timeBonus * scoreMultiplier)
-        .round();
-
-    if (finalScore > 0) {
-      score += finalScore;
-
-      // Visual feedback for score multipliers
-      if (chainBonus > 1.0) {
-        // Show chain reaction text effect
-        showFloatingText(
-          "Chain x${chainBonus.toStringAsFixed(1)}!",
-          Colors.yellow,
-        );
-      }
-      if (timeBonus > 1.0) {
-        // Show quick placement bonus text effect
-        showFloatingText("Quick! +50%", Colors.green);
-      }
-      if (scoreMultiplier > 1.0) {
-        // Show streak multiplier text effect
-        showFloatingText(
-          "Streak x${scoreMultiplier.toStringAsFixed(1)}!",
-          Colors.orange,
-        );
-      }
-    }
-  }
-
-  // Helper method to show floating text effects
   void showFloatingText(String text, Color color) {
-    // This will be implemented in the rendering code to show floating text animations
-    // The text will float up and fade out
+    // Floating text implementation can be added here
+  }
+}
+
+extension on Offset {
+  Offset get normalized {
+    final length = sqrt(dx * dx + dy * dy);
+    return length == 0 ? this : Offset(dx / length, dy / length);
   }
 }
