@@ -13,7 +13,9 @@ dependencies:
   cupertino_icons: ^1.0.8
   flame: ^1.33.0
   audioplayers: ^6.5.1
-  flame_audio: ^2.11.11   # ⬅️ სწორად ჩასმული ხაზზე!
+  shared_preferences: ^2.5.3
+  flame_audio: ^2.11.11   
+
 
 dev_dependencies:
   flutter_test:

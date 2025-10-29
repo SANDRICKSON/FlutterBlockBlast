@@ -4,15 +4,11 @@ import 'package:flame_audio/flame_audio.dart';
 import 'package:flutter/material.dart';
 import 'dart:math';
 import 'package:flame/components.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-// Block class
-enum BlockType {
-  normal,
-  lineClear,
-  colorBomb,
-  timeSlow,
-  shrink,
-}
+enum GameTimeVariant { twoMinutes, fiveMinutes, tenMinutes, unlimited }
+
+enum BlockType { normal, lineClear, colorBomb, timeSlow, shrink }
 
 class Block {
   List<List<int>> shape;
@@ -87,14 +83,14 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
   // Audio management
   bool audioLoaded = false;
-  
+
   // Hint System
   bool showHint = false;
   (int, int, int)? hintPosition;
   double hintOpacity = 0.0;
   bool isHintAvailable = false;
   int hintCost = 0;
-  
+
   // Responsive scaling factors
   double get scaleFactor => min(size.x, size.y) / 600;
   double get smallScaleFactor => min(1.0, scaleFactor);
@@ -137,10 +133,37 @@ class BlockBlastGame extends FlameGame with PanDetector {
   // Animation properties
   List<({Offset position, Color color, double scale, double opacity})>
   blockPlacementEffects = [];
-  List<({int row, int col, double scale, double opacity})> cellClearEffects = [];
+  List<({int row, int col, double scale, double opacity})> cellClearEffects =
+      [];
   double scoreAnimationScale = 1.0;
   Color? lastScoreColor;
   int displayScore = 0;
+
+  // Game time management
+  GameTimeVariant currentTimeVariant = GameTimeVariant.unlimited;
+  double remainingTime = 0.0;
+  bool isGameOver = false;
+  bool isPaused = false;
+  bool showTimeVariantMenu = true;
+  bool showRulesOverlay = false;
+
+  // Rating system
+  Map<GameTimeVariant, int> timeVariantHighScores = {
+    GameTimeVariant.twoMinutes: 0,
+    GameTimeVariant.fiveMinutes: 0,
+    GameTimeVariant.tenMinutes: 0,
+    GameTimeVariant.unlimited: 0,
+  };
+
+  // Database keys
+  static const String _highScoreKey = 'block_blast_high_score';
+  static const String _totalGamesKey = 'block_blast_total_games';
+  static const String _totalScoreKey = 'block_blast_total_score';
+  static const String _timeVariantKey = 'block_blast_time_variant';
+  static const String _twoMinutesHighScore = 'two_minutes_high_score';
+  static const String _fiveMinutesHighScore = 'five_minutes_high_score';
+  static const String _tenMinutesHighScore = 'ten_minutes_high_score';
+  static const String _unlimitedHighScore = 'unlimited_high_score';
 
   // Modern color palette for blocks
   static final List<Color> blockColors = [
@@ -188,9 +211,79 @@ class BlockBlastGame extends FlameGame with PanDetector {
   Future<void> onLoad() async {
     super.onLoad();
     _calculateResponsiveValues();
+    await _loadHighScores();
     generateBottomBlocks();
     await _loadAudio();
     _updateHintAvailability();
+  }
+
+  // Database functions
+  Future<void> _loadHighScores() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      
+      // Load individual time variant high scores
+      timeVariantHighScores[GameTimeVariant.twoMinutes] = 
+          prefs.getInt(_twoMinutesHighScore) ?? 0;
+      timeVariantHighScores[GameTimeVariant.fiveMinutes] = 
+          prefs.getInt(_fiveMinutesHighScore) ?? 0;
+      timeVariantHighScores[GameTimeVariant.tenMinutes] = 
+          prefs.getInt(_tenMinutesHighScore) ?? 0;
+      timeVariantHighScores[GameTimeVariant.unlimited] = 
+          prefs.getInt(_unlimitedHighScore) ?? 0;
+      
+      // Load current time variant
+      currentTimeVariant =
+          GameTimeVariant.values[prefs.getInt(_timeVariantKey) ?? 
+          GameTimeVariant.unlimited.index];
+          
+      // Set overall high score to the maximum of all variants
+      highScore = timeVariantHighScores.values.reduce(max);
+    } catch (e) {
+      print('Error loading high scores: $e');
+    }
+  }
+
+  Future<void> _saveHighScores() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      
+      // Save individual time variant high scores
+      if (score > timeVariantHighScores[currentTimeVariant]!) {
+        timeVariantHighScores[currentTimeVariant] = score;
+        
+        switch (currentTimeVariant) {
+          case GameTimeVariant.twoMinutes:
+            await prefs.setInt(_twoMinutesHighScore, score);
+            break;
+          case GameTimeVariant.fiveMinutes:
+            await prefs.setInt(_fiveMinutesHighScore, score);
+            break;
+          case GameTimeVariant.tenMinutes:
+            await prefs.setInt(_tenMinutesHighScore, score);
+            break;
+          case GameTimeVariant.unlimited:
+            await prefs.setInt(_unlimitedHighScore, score);
+            break;
+        }
+      }
+
+      // Save overall high score
+      if (score > highScore) {
+        highScore = score;
+        await prefs.setInt(_highScoreKey, highScore);
+      }
+
+      // Save game statistics
+      final totalGames = prefs.getInt(_totalGamesKey) ?? 0;
+      final totalScore = prefs.getInt(_totalScoreKey) ?? 0;
+
+      await prefs.setInt(_totalGamesKey, totalGames + 1);
+      await prefs.setInt(_totalScoreKey, totalScore + score);
+      await prefs.setInt(_timeVariantKey, currentTimeVariant.index);
+    } catch (e) {
+      print('Error saving high scores: $e');
+    }
   }
 
   Future<void> _loadAudio() async {
@@ -222,6 +315,58 @@ class BlockBlastGame extends FlameGame with PanDetector {
     }
   }
 
+  // Time variant management
+  void setTimeVariant(GameTimeVariant variant) {
+    currentTimeVariant = variant;
+    switch (variant) {
+      case GameTimeVariant.twoMinutes:
+        remainingTime = 120.0;
+        break;
+      case GameTimeVariant.fiveMinutes:
+        remainingTime = 300.0;
+        break;
+      case GameTimeVariant.tenMinutes:
+        remainingTime = 600.0;
+        break;
+      case GameTimeVariant.unlimited:
+        remainingTime = 0.0;
+        break;
+    }
+    isGameOver = false;
+    showTimeVariantMenu = false;
+    isPaused = false;
+    startNewGame();
+  }
+
+  String getTimeVariantName(GameTimeVariant variant) {
+    switch (variant) {
+      case GameTimeVariant.twoMinutes:
+        return '2 Minutes';
+      case GameTimeVariant.fiveMinutes:
+        return '5 Minutes';
+      case GameTimeVariant.tenMinutes:
+        return '10 Minutes';
+      case GameTimeVariant.unlimited:
+        return 'Unlimited';
+    }
+  }
+
+  String getFormattedTime() {
+    if (currentTimeVariant == GameTimeVariant.unlimited) {
+      return 'Unlimited';
+    }
+
+    final minutes = (remainingTime ~/ 60);
+    final seconds = (remainingTime % 60).toInt();
+    
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  // Get high score for specific time variant
+  int getHighScoreForVariant(GameTimeVariant variant) {
+    return timeVariantHighScores[variant] ?? 0;
+  }
+
   @override
   void onGameResize(Vector2 size) {
     super.onGameResize(size);
@@ -233,11 +378,11 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
   void _calculateResponsiveValues() {
     final minDimension = min(size.x, size.y);
-    
+
     cellSize = max(30.0, min(50.0, minDimension * 0.08));
     cellPadding = max(2.0, cellSize * 0.08);
     gridPadding = max(20.0, minDimension * 0.05);
-    
+
     final gridHeight = gridSize * cellSize + (gridSize - 1) * cellPadding;
     bottomBlocksY = gridPadding + gridHeight + 40;
   }
@@ -250,6 +395,8 @@ class BlockBlastGame extends FlameGame with PanDetector {
   }
 
   void _positionBottomBlocks() {
+    if (bottomBlocks.isEmpty) return;
+    
     double totalWidth = 0;
     for (var block in bottomBlocks) {
       totalWidth += block.shape[0].length * (cellSize + cellPadding);
@@ -258,7 +405,8 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
     double startX = (size.x - totalWidth) / 2;
     for (int i = 0; i < bottomBlocks.length; i++) {
-      double blockWidth = bottomBlocks[i].shape[0].length * (cellSize + cellPadding);
+      double blockWidth =
+          bottomBlocks[i].shape[0].length * (cellSize + cellPadding);
       bottomBlocks[i].position = Offset(startX, bottomBlocksY);
       startX += blockWidth + cellSize;
     }
@@ -272,21 +420,21 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
   void activateHint() {
     if (!isHintAvailable || score == 0) return;
-    
+
     hintCost = score ~/ 2;
     if (hintCost <= 0) return;
-    
+
     score -= hintCost;
     displayScore = score;
-    
+
     _findAndShowBestMove();
     _updateHintAvailability();
-    
+
     aiFeedback = "Hint: -$hintCost points";
     feedbackColor = Colors.orange;
     showFeedback = true;
     feedbackOpacity = 1.0;
-    
+
     Future.delayed(const Duration(seconds: 2), () {
       showFeedback = false;
     });
@@ -295,10 +443,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
   void _findAndShowBestMove() {
     int bestScore = -1;
     (int, int, int)? bestMove;
-    
+
     for (int blockIndex = 0; blockIndex < bottomBlocks.length; blockIndex++) {
       var block = bottomBlocks[blockIndex];
-      
+
       for (int y = 0; y <= gridSize - block.shape.length; y++) {
         for (int x = 0; x <= gridSize - block.shape[0].length; x++) {
           if (canPlace(block.shape, x, y)) {
@@ -311,12 +459,12 @@ class BlockBlastGame extends FlameGame with PanDetector {
         }
       }
     }
-    
+
     if (bestMove != null) {
       hintPosition = bestMove;
       showHint = true;
       hintOpacity = 1.0;
-      
+
       Future.delayed(const Duration(seconds: 5), () {
         showHint = false;
         hintPosition = null;
@@ -326,34 +474,38 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
   void _drawHint(Canvas canvas) {
     if (!showHint || hintPosition == null) return;
-    
+
     final (blockIndex, hintX, hintY) = hintPosition!;
     if (blockIndex >= bottomBlocks.length) return;
-    
+
     var block = bottomBlocks[blockIndex];
     final gridWidth = gridSize * cellSize + (gridSize - 1) * cellPadding;
     final gridLeft = (size.x - gridWidth) / 2;
     final gridTop = gridPadding;
-    
+
     final blockRect = Rect.fromLTWH(
       block.position.dx,
       block.position.dy,
       block.shape[0].length * cellSize,
       block.shape.length * cellSize,
     );
-    
-    final glowAnimation = sin(DateTime.now().millisecondsSinceEpoch / 200) * 0.3 + 0.7;
+
+    final glowAnimation =
+        sin(DateTime.now().millisecondsSinceEpoch / 200) * 0.3 + 0.7;
     final glowPaint = Paint()
       ..color = Colors.yellow.withOpacity(0.5 * hintOpacity * glowAnimation)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 4
       ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8);
-    
+
     canvas.drawRRect(
-      RRect.fromRectAndRadius(blockRect.inflate(8), Radius.circular(cellSize * 0.2)),
+      RRect.fromRectAndRadius(
+        blockRect.inflate(8),
+        Radius.circular(cellSize * 0.2),
+      ),
       glowPaint,
     );
-    
+
     for (int y = 0; y < block.shape.length; y++) {
       for (int x = 0; x < block.shape[y].length; x++) {
         if (block.shape[y][x] == 1) {
@@ -363,16 +515,21 @@ class BlockBlastGame extends FlameGame with PanDetector {
             cellSize,
             cellSize,
           );
-          
+
           final placementGlow = Paint()
-            ..color = Colors.green.withOpacity(0.4 * hintOpacity * glowAnimation)
+            ..color = Colors.green.withOpacity(
+              0.4 * hintOpacity * glowAnimation,
+            )
             ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 6);
-          
+
           canvas.drawRRect(
-            RRect.fromRectAndRadius(hintRect.inflate(6), Radius.circular(cellSize * 0.2)),
+            RRect.fromRectAndRadius(
+              hintRect.inflate(6),
+              Radius.circular(cellSize * 0.2),
+            ),
             placementGlow,
           );
-          
+
           canvas.drawRRect(
             RRect.fromRectAndRadius(hintRect, Radius.circular(cellSize * 0.16)),
             Paint()
@@ -383,53 +540,57 @@ class BlockBlastGame extends FlameGame with PanDetector {
         }
       }
     }
-    
-    final blockCenter = Offset(
-      blockRect.center.dx,
-      blockRect.center.dy,
-    );
-    
+
+    final blockCenter = Offset(blockRect.center.dx, blockRect.center.dy);
+
     final placementCenter = Offset(
       gridLeft + (hintX + block.shape[0].length / 2) * (cellSize + cellPadding),
       gridTop + (hintY + block.shape.length / 2) * (cellSize + cellPadding),
     );
-    
+
     final linePaint = Paint()
       ..color = Colors.yellow.withOpacity(0.6 * hintOpacity)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2
       ..strokeCap = StrokeCap.round;
-    
+
     canvas.drawLine(blockCenter, placementCenter, linePaint);
-    _drawArrow(canvas, placementCenter, blockCenter, Colors.yellow.withOpacity(hintOpacity));
+    _drawArrow(
+      canvas,
+      placementCenter,
+      blockCenter,
+      Colors.yellow.withOpacity(hintOpacity),
+    );
   }
 
   void _drawArrow(Canvas canvas, Offset from, Offset to, Color color) {
     final direction = (to - from).normalized;
     const arrowSize = 8.0;
-    
+
     final arrowPaint = Paint()
       ..color = color
       ..style = PaintingStyle.fill;
-    
+
     final path = Path();
     path.moveTo(from.dx, from.dy);
-    
+
     final perpendicular = Offset(-direction.dy, direction.dx);
-    final arrowPoint1 = from + direction * arrowSize + perpendicular * arrowSize * 0.5;
-    final arrowPoint2 = from + direction * arrowSize - perpendicular * arrowSize * 0.5;
-    
+    final arrowPoint1 =
+        from + direction * arrowSize + perpendicular * arrowSize * 0.5;
+    final arrowPoint2 =
+        from + direction * arrowSize - perpendicular * arrowSize * 0.5;
+
     path.lineTo(arrowPoint1.dx, arrowPoint1.dy);
     path.lineTo(arrowPoint2.dx, arrowPoint2.dy);
     path.close();
-    
+
     canvas.drawPath(path, arrowPaint);
   }
 
   // AI Analysis
   void _analyzeMove(Block block, int x, int y) {
     int placementScore = _calculatePlacementScore(block, x, y);
-    
+
     if (placementScore >= 40) {
       aiFeedback = "Great Move! +${placementScore}";
       feedbackColor = Colors.green;
@@ -446,10 +607,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
       aiFeedback = "Poor +${placementScore}";
       feedbackColor = Colors.red;
     }
-    
+
     showFeedback = true;
     feedbackOpacity = 1.0;
-    
+
     Future.delayed(const Duration(seconds: 2), () {
       showFeedback = false;
     });
@@ -457,19 +618,19 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
   int _calculatePlacementScore(Block block, int x, int y) {
     int score = 0;
-    
+
     var tempGrid = _copyGrid();
     _placeBlockOnGrid(tempGrid, block, x, y);
-    
+
     score += _checkLinesForScore(tempGrid) * 15;
-    
+
     int centerX = gridSize ~/ 2;
     int centerY = gridSize ~/ 2;
     double distanceFromCenter = sqrt(pow(x - centerX, 2) + pow(y - centerY, 2));
     score += max(0, (12 - distanceFromCenter).toInt());
-    
+
     score += block.shape.length * block.shape[0].length;
-    
+
     return score;
   }
 
@@ -477,7 +638,12 @@ class BlockBlastGame extends FlameGame with PanDetector {
     return grid.map((row) => List<Color?>.from(row)).toList();
   }
 
-  void _placeBlockOnGrid(List<List<Color?>> targetGrid, Block block, int x, int y) {
+  void _placeBlockOnGrid(
+    List<List<Color?>> targetGrid,
+    Block block,
+    int x,
+    int y,
+  ) {
     for (int dy = 0; dy < block.shape.length; dy++) {
       for (int dx = 0; dx < block.shape[dy].length; dx++) {
         if (block.shape[dy][dx] == 1) {
@@ -489,13 +655,13 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
   int _checkLinesForScore(List<List<Color?>> targetGrid) {
     int lines = 0;
-    
+
     for (int y = 0; y < gridSize; y++) {
       if (targetGrid[y].every((cell) => cell != null)) {
         lines++;
       }
     }
-    
+
     for (int x = 0; x < gridSize; x++) {
       bool fullColumn = true;
       for (int y = 0; y < gridSize; y++) {
@@ -506,34 +672,127 @@ class BlockBlastGame extends FlameGame with PanDetector {
       }
       if (fullColumn) lines++;
     }
-    
+
     return lines;
   }
 
   List<List<int>> randomShape() {
     int type = random.nextInt(20);
     switch (type) {
-      case 0: return [[1]];
-      case 1: return [[1, 1]];
-      case 2: return [[1], [1]];
-      case 3: return [[1, 1], [1, 1]];
-      case 4: return [[1, 1, 1]];
-      case 5: return [[1, 0], [1, 0], [1, 1]];
-      case 6: return [[0, 1], [0, 1], [1, 1]];
-      case 7: return [[1, 1, 1], [0, 1, 0]];
-      case 8: return [[0, 1, 1], [1, 1, 0]];
-      case 9: return [[1, 1, 0], [0, 1, 1]];
-      case 10: return [[1], [1], [1], [1]];
-      case 11: return [[0, 1, 0], [1, 1, 1], [0, 1, 0]];
-      case 12: return [[1, 1, 1], [1, 1, 1], [1, 1, 1]];
-      case 13: return [[1, 0, 1], [1, 0, 1], [1, 1, 1]];
-      case 14: return [[1, 0, 1], [1, 1, 1], [1, 0, 1]];
-      case 15: return [[1, 0, 1], [0, 1, 0], [1, 0, 1]];
-      case 16: return [[1, 1, 1], [1, 0, 1], [1, 1, 1]];
-      case 17: return [[1, 1, 1], [1, 0, 0], [1, 1, 1]];
-      case 18: return [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
-      case 19: return [[1, 1, 0], [1, 0, 0], [1, 1, 1]];
-      default: return [[1]];
+      case 0:
+        return [
+          [1],
+        ];
+      case 1:
+        return [
+          [1, 1],
+        ];
+      case 2:
+        return [
+          [1],
+          [1],
+        ];
+      case 3:
+        return [
+          [1, 1],
+          [1, 1],
+        ];
+      case 4:
+        return [
+          [1, 1, 1],
+        ];
+      case 5:
+        return [
+          [1, 0],
+          [1, 0],
+          [1, 1],
+        ];
+      case 6:
+        return [
+          [0, 1],
+          [0, 1],
+          [1, 1],
+        ];
+      case 7:
+        return [
+          [1, 1, 1],
+          [0, 1, 0],
+        ];
+      case 8:
+        return [
+          [0, 1, 1],
+          [1, 1, 0],
+        ];
+      case 9:
+        return [
+          [1, 1, 0],
+          [0, 1, 1],
+        ];
+      case 10:
+        return [
+          [1],
+          [1],
+          [1],
+          [1],
+        ];
+      case 11:
+        return [
+          [0, 1, 0],
+          [1, 1, 1],
+          [0, 1, 0],
+        ];
+      case 12:
+        return [
+          [1, 1, 1],
+          [1, 1, 1],
+          [1, 1, 1],
+        ];
+      case 13:
+        return [
+          [1, 0, 1],
+          [1, 0, 1],
+          [1, 1, 1],
+        ];
+      case 14:
+        return [
+          [1, 0, 1],
+          [1, 1, 1],
+          [1, 0, 1],
+        ];
+      case 15:
+        return [
+          [1, 0, 1],
+          [0, 1, 0],
+          [1, 0, 1],
+        ];
+      case 16:
+        return [
+          [1, 1, 1],
+          [1, 0, 1],
+          [1, 1, 1],
+        ];
+      case 17:
+        return [
+          [1, 1, 1],
+          [1, 0, 0],
+          [1, 1, 1],
+        ];
+      case 18:
+        return [
+          [1, 0, 0],
+          [0, 1, 0],
+          [0, 0, 1],
+        ];
+      case 19:
+        return [
+          [1, 1, 0],
+          [1, 0, 0],
+          [1, 1, 1],
+        ];
+      default:
+        return [
+          [1],
+        ];
     }
   }
 
@@ -553,6 +812,21 @@ class BlockBlastGame extends FlameGame with PanDetector {
   @override
   void update(double dt) {
     super.update(dt);
+
+    // Update time if not unlimited and game is active
+    if (currentTimeVariant != GameTimeVariant.unlimited &&
+        !isGameOver &&
+        !isPaused &&
+        !showContinuePrompt &&
+        !showTimeVariantMenu &&
+        !showRulesOverlay) {
+      remainingTime -= dt;
+      if (remainingTime <= 0) {
+        remainingTime = 0;
+        isGameOver = true;
+        _saveHighScores();
+      }
+    }
 
     // Update block placement effects
     for (int i = blockPlacementEffects.length - 1; i >= 0; i--) {
@@ -620,7 +894,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
       scoreAnimationScale = max(1.0, scoreAnimationScale - dt * 2);
     }
     if (displayScore < score) {
-      displayScore = min(score, displayScore + (score - displayScore) ~/ 10 + 1);
+      displayScore = min(
+        score,
+        displayScore + (score - displayScore) ~/ 10 + 1,
+      );
     }
 
     if (showContinuePrompt) {
@@ -636,13 +913,18 @@ class BlockBlastGame extends FlameGame with PanDetector {
       }
     }
 
-    if (bottomBlocks.isEmpty && !showContinuePrompt) {
+    if (bottomBlocks.isEmpty && !showContinuePrompt && !isGameOver && !showTimeVariantMenu && !showRulesOverlay) {
       Future.delayed(const Duration(seconds: 2), () {
         startNewGame();
       });
     }
 
-    if (!showContinuePrompt && bottomBlocks.isNotEmpty && !canPlaceAnyBlock()) {
+    if (!showContinuePrompt &&
+        bottomBlocks.isNotEmpty &&
+        !canPlaceAnyBlock() &&
+        !isGameOver &&
+        !showTimeVariantMenu &&
+        !showRulesOverlay) {
       showContinuePrompt = true;
       continuePromptTimer = 5.0;
       canContinue = true;
@@ -658,7 +940,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
         block.opacity = min(1.0, block.opacity + dt * 5);
       }
     }
-    
+
     _updateHintAvailability();
   }
 
@@ -682,9 +964,54 @@ class BlockBlastGame extends FlameGame with PanDetector {
     consecutivePlacements = 0;
     hasExplosivePowerUp = false;
     hasColorMatchPowerUp = false;
+    isGameOver = false;
     grid = List.generate(gridSize, (_) => List.filled(gridSize, null));
+
+    // Reset time based on variant
+    switch (currentTimeVariant) {
+      case GameTimeVariant.twoMinutes:
+        remainingTime = 120.0;
+        break;
+      case GameTimeVariant.fiveMinutes:
+        remainingTime = 300.0;
+        break;
+      case GameTimeVariant.tenMinutes:
+        remainingTime = 600.0;
+        break;
+      case GameTimeVariant.unlimited:
+        remainingTime = 0.0;
+        break;
+    }
+
     generateBottomBlocks();
     _updateHintAvailability();
+  }
+
+  void pauseGame() {
+    isPaused = true;
+  }
+
+  void resumeGame() {
+    isPaused = false;
+  }
+
+  void showTimeVariantSelection() {
+    showTimeVariantMenu = true;
+    isPaused = true;
+  }
+
+  void showRules() {
+    showRulesOverlay = true;
+    isPaused = true;
+  }
+
+  void hideRules() {
+    showRulesOverlay = false;
+    isPaused = false;
+  }
+
+  void restartGame() {
+    startNewGame();
   }
 
   @override
@@ -717,6 +1044,16 @@ class BlockBlastGame extends FlameGame with PanDetector {
           Paint()..color = Colors.white.withOpacity(0.03),
         );
       }
+    }
+
+    if (showTimeVariantMenu) {
+      _drawTimeVariantMenu(canvas);
+      return;
+    }
+
+    if (showRulesOverlay) {
+      _drawRulesOverlay(canvas);
+      return;
     }
 
     // Calculate grid position to center it
@@ -803,10 +1140,6 @@ class BlockBlastGame extends FlameGame with PanDetector {
     // Draw preview when dragging
     if (draggingBlock != null && currentGridPosition != null) {
       final (previewX, previewY) = currentGridPosition!;
-      final gridWidth = gridSize * cellSize + (gridSize - 1) * cellPadding;
-      final gridLeft = (size.x - gridWidth) / 2;
-      final gridHeight = gridSize * cellSize + (gridSize - 1) * cellPadding;
-      final gridTop = gridPadding;
 
       for (int y = 0; y < draggingBlock!.shape.length; y++) {
         for (int x = 0; x < draggingBlock!.shape[y].length; x++) {
@@ -825,7 +1158,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
                   : Colors.red.withOpacity(previewOpacity * 0.5);
 
             canvas.drawRRect(
-              RRect.fromRectAndRadius(previewRect, Radius.circular(cellSize * 0.16)),
+              RRect.fromRectAndRadius(
+                previewRect,
+                Radius.circular(cellSize * 0.16),
+              ),
               Paint()
                 ..color = isValidPosition
                     ? draggingBlock!.color.withOpacity(previewOpacity * 0.3)
@@ -841,7 +1177,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
             );
 
             canvas.drawRRect(
-              RRect.fromRectAndRadius(previewRect, Radius.circular(cellSize * 0.16)),
+              RRect.fromRectAndRadius(
+                previewRect,
+                Radius.circular(cellSize * 0.16),
+              ),
               Paint()
                 ..style = PaintingStyle.stroke
                 ..strokeWidth = 2
@@ -891,7 +1230,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
               ).createShader(blockRect);
 
             canvas.drawRRect(
-              RRect.fromRectAndRadius(blockRect, Radius.circular(cellSize * 0.16)),
+              RRect.fromRectAndRadius(
+                blockRect,
+                Radius.circular(cellSize * 0.16),
+              ),
               blockPaint,
             );
 
@@ -917,7 +1259,26 @@ class BlockBlastGame extends FlameGame with PanDetector {
       _drawAiFeedback(canvas);
     }
 
-    // Responsive UI elements
+    // Draw game UI
+    _drawGameUI(canvas);
+
+    // Draw game over screen if time's up
+    if (isGameOver && currentTimeVariant != GameTimeVariant.unlimited) {
+      _drawGameOverScreen(canvas);
+    }
+
+    // Draw continue prompt if needed
+    if (showContinuePrompt && !isGameOver) {
+      _drawContinuePrompt(canvas);
+    }
+
+    // Draw pause indicator
+    if (isPaused && !showRulesOverlay) {
+      _drawPauseScreen(canvas);
+    }
+  }
+
+  void _drawGameUI(Canvas canvas) {
     final baseFontSize = 16.0 * scaleFactor;
     final panelHeight = 40.0 * smallScaleFactor;
     final panelWidth = 160.0 * smallScaleFactor;
@@ -952,6 +1313,67 @@ class BlockBlastGame extends FlameGame with PanDetector {
         ).createShader(scorePanelRect.outerRect),
     );
 
+    // Draw time panel if not unlimited
+    if (currentTimeVariant != GameTimeVariant.unlimited) {
+      final timePanelRect = RRect.fromRectAndRadius(
+        Rect.fromCenter(
+          center: Offset(size.x / 2, panelHeight * 1.5 + 20),
+          width: panelWidth,
+          height: panelHeight,
+        ),
+        Radius.circular(panelHeight / 2),
+      );
+
+      final timeColor = remainingTime < 30.0
+          ? Colors.red[400]!
+          : Colors.green[400]!;
+
+      canvas.drawRRect(
+        timePanelRect.inflate(2),
+        Paint()
+          ..color = timeColor.withOpacity(0.3)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
+      );
+
+      canvas.drawRRect(
+        timePanelRect,
+        Paint()
+          ..shader = LinearGradient(
+            colors: [timeColor.withOpacity(0.7), timeColor.withOpacity(0.7)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ).createShader(timePanelRect.outerRect),
+      );
+
+      final timeText = getFormattedTime();
+      final timePainter = TextPainter(
+        text: TextSpan(
+          text: timeText,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: baseFontSize * 1.2,
+            fontWeight: FontWeight.bold,
+            shadows: [
+              Shadow(
+                blurRadius: 8,
+                color: timeColor.withOpacity(0.7),
+                offset: const Offset(0, 0),
+              ),
+            ],
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      );
+      timePainter.layout();
+      timePainter.paint(
+        canvas,
+        Offset(
+          size.x / 2 - timePainter.width / 2,
+          panelHeight * 1.5 + 20 - timePainter.height / 2,
+        ),
+      );
+    }
+
     // Draw hint button
     final hintButtonSize = 50.0 * smallScaleFactor;
     final hintButtonRect = RRect.fromRectAndRadius(
@@ -963,7 +1385,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
       Radius.circular(hintButtonSize / 2),
     );
 
-    final hintButtonGlowColor = isHintAvailable 
+    final hintButtonGlowColor = isHintAvailable
         ? Colors.orange[400]!.withOpacity(0.3)
         : Colors.grey[400]!.withOpacity(0.2);
 
@@ -1023,7 +1445,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
       );
     }
 
-    // Draw rules icon button
+    // Draw rules button
     final rulesButtonSize = 50.0 * smallScaleFactor;
     final rulesButtonRect = RRect.fromRectAndRadius(
       Rect.fromCenter(
@@ -1037,7 +1459,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
     canvas.drawRRect(
       rulesButtonRect.inflate(2),
       Paint()
-        ..color = Colors.green[400]!.withOpacity(0.3)
+        ..color = Colors.purple[400]!.withOpacity(0.3)
         ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
     );
 
@@ -1046,8 +1468,8 @@ class BlockBlastGame extends FlameGame with PanDetector {
       Paint()
         ..shader = LinearGradient(
           colors: [
-            Colors.green[700]!.withOpacity(0.9),
-            Colors.green[500]!.withOpacity(0.9),
+            Colors.purple[700]!.withOpacity(0.9),
+            Colors.purple[500]!.withOpacity(0.9),
           ],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
@@ -1056,11 +1478,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
     final rulesIconPainter = TextPainter(
       text: TextSpan(
-        text: '?',
+        text: '📖',
         style: TextStyle(
           color: Colors.white,
-          fontSize: baseFontSize * 1.5,
-          fontWeight: FontWeight.bold,
+          fontSize: baseFontSize * 1.2,
         ),
       ),
       textDirection: TextDirection.ltr,
@@ -1074,91 +1495,55 @@ class BlockBlastGame extends FlameGame with PanDetector {
       ),
     );
 
-    // Draw power-up indicators
-    if (hasExplosivePowerUp || hasColorMatchPowerUp) {
-      final powerUpRect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(size.x / 2 - panelWidth - 60, 10, panelWidth, panelHeight),
-        Radius.circular(panelHeight / 2),
-      );
+    // Draw restart button
+    final restartButtonSize = 50.0 * smallScaleFactor;
+    final restartButtonRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: Offset(size.x - restartButtonSize / 2 - 70, panelHeight / 2 + 10),
+        width: restartButtonSize,
+        height: restartButtonSize,
+      ),
+      Radius.circular(restartButtonSize / 2),
+    );
 
-      canvas.drawRRect(
-        powerUpRect.inflate(2),
-        Paint()
-          ..color = Colors.purple[400]!.withOpacity(0.3)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
-      );
+    canvas.drawRRect(
+      restartButtonRect.inflate(2),
+      Paint()
+        ..color = Colors.red[400]!.withOpacity(0.3)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 4),
+    );
 
-      canvas.drawRRect(
-        powerUpRect,
-        Paint()
-          ..shader = LinearGradient(
-            colors: [
-              Colors.purple[900]!.withOpacity(0.7),
-              Colors.purple[700]!.withOpacity(0.7),
-            ],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ).createShader(powerUpRect.outerRect),
-      );
+    canvas.drawRRect(
+      restartButtonRect,
+      Paint()
+        ..shader = LinearGradient(
+          colors: [
+            Colors.red[700]!.withOpacity(0.9),
+            Colors.red[500]!.withOpacity(0.9),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ).createShader(restartButtonRect.outerRect),
+    );
 
-      final iconSize = 20.0 * smallScaleFactor;
-      var xOffset = size.x / 2 - panelWidth - 50;
-
-      if (hasExplosivePowerUp) {
-        canvas.drawCircle(
-          Offset(xOffset + iconSize / 2, 10 + panelHeight / 2),
-          iconSize / 2,
-          Paint()..color = Colors.orange,
-        );
-        canvas.drawCircle(
-          Offset(xOffset + iconSize / 2, 10 + panelHeight / 2),
-          iconSize / 4,
-          Paint()..color = Colors.red,
-        );
-        xOffset += iconSize + 10;
-      }
-
-      if (hasColorMatchPowerUp) {
-        for (int i = 0; i < 3; i++) {
-          canvas.drawCircle(
-            Offset(xOffset + i * 8 * smallScaleFactor, 10 + panelHeight / 2),
-            iconSize / 4,
-            Paint()..color = blockColors[i],
-          );
-        }
-      }
-    }
-
-    // Draw multiplier text
-    if (scoreMultiplier > 1.0) {
-      final multiplierText = 'x${scoreMultiplier.toStringAsFixed(1)}';
-      final multiplierPainter = TextPainter(
-        text: TextSpan(
-          text: multiplierText,
-          style: TextStyle(
-            color: Colors.orange,
-            fontSize: baseFontSize * 1.2,
-            fontWeight: FontWeight.bold,
-            shadows: [
-              Shadow(
-                blurRadius: 8,
-                color: Colors.orange[300]!.withOpacity(0.7),
-                offset: const Offset(0, 0),
-              ),
-            ],
-          ),
+    final restartIconPainter = TextPainter(
+      text: TextSpan(
+        text: '🔄',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: baseFontSize * 1.2,
         ),
-        textDirection: TextDirection.ltr,
-      );
-      multiplierPainter.layout();
-      multiplierPainter.paint(
-        canvas, 
-        Offset(
-          size.x / 2 + panelWidth / 2 + 10,
-          10 + (panelHeight - multiplierPainter.height) / 2,
-        ),
-      );
-    }
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    restartIconPainter.layout();
+    restartIconPainter.paint(
+      canvas,
+      Offset(
+        size.x - restartButtonSize / 2 - 70 - restartIconPainter.width / 2,
+        panelHeight / 2 + 10 - restartIconPainter.height / 2,
+      ),
+    );
 
     // Draw score text
     final scoreText = 'Score: $displayScore';
@@ -1190,29 +1575,302 @@ class BlockBlastGame extends FlameGame with PanDetector {
     final textX = size.x / 2 - textPainter.width / 2;
     final textY = 10 + (panelHeight - textPainter.height) / 2;
     textPainter.paint(canvas, Offset(textX, textY));
+  }
 
-    // Draw continue prompt if needed
-    if (showContinuePrompt) {
-      _drawContinuePrompt(canvas, baseFontSize);
+  void _drawTimeVariantMenu(Canvas canvas) {
+    // Draw semi-transparent overlay
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, size.x, size.y),
+      Paint()..color = Colors.black.withOpacity(0.8),
+    );
+
+    final baseFontSize = 20.0 * scaleFactor;
+    final buttonWidth = min(300.0, size.x * 0.7);
+    final buttonHeight = 60.0 * smallScaleFactor;
+    final buttonSpacing = 20.0 * smallScaleFactor;
+
+    // Title
+    final titlePainter = TextPainter(
+      text: TextSpan(
+        text: 'Select Game Mode',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: baseFontSize * 1.8,
+          fontWeight: FontWeight.bold,
+          shadows: [
+            Shadow(
+              blurRadius: 8,
+              color: Colors.blue[300]!.withOpacity(0.7),
+              offset: const Offset(0, 0),
+            ),
+          ],
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    titlePainter.layout();
+    titlePainter.paint(
+      canvas,
+      Offset(size.x / 2 - titlePainter.width / 2, size.y * 0.1),
+    );
+
+    // Time variant buttons
+    final variants = GameTimeVariant.values;
+    double startY = size.y * 0.25;
+
+    for (int i = 0; i < variants.length; i++) {
+      final variant = variants[i];
+      final buttonRect = RRect.fromRectAndRadius(
+        Rect.fromCenter(
+          center: Offset(size.x / 2, startY + i * (buttonHeight + buttonSpacing)),
+          width: buttonWidth,
+          height: buttonHeight,
+        ),
+        Radius.circular(buttonHeight / 4),
+      );
+
+      // Button glow
+      canvas.drawRRect(
+        buttonRect.inflate(4),
+        Paint()
+          ..color = _getVariantColor(variant).withOpacity(0.3)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8),
+      );
+
+      // Button background
+      canvas.drawRRect(
+        buttonRect,
+        Paint()
+          ..shader = LinearGradient(
+            colors: [
+              _getVariantColor(variant).withOpacity(0.9),
+              _getVariantColor(variant).withOpacity(0.7),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ).createShader(buttonRect.outerRect),
+      );
+
+      // Button text
+      final variantName = getTimeVariantName(variant);
+      final highScore = getHighScoreForVariant(variant);
+      
+      final textPainter = TextPainter(
+        text: TextSpan(
+          children: [
+            TextSpan(
+              text: '$variantName\n',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: baseFontSize * 1.2,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            TextSpan(
+              text: 'High Score: $highScore',
+              style: TextStyle(
+                color: Colors.yellow,
+                fontSize: baseFontSize * 0.8,
+              ),
+            ),
+          ],
+        ),
+        textAlign: TextAlign.center,
+        textDirection: TextDirection.ltr,
+      );
+      textPainter.layout(maxWidth: buttonWidth - 20);
+      textPainter.paint(
+        canvas,
+        Offset(
+          size.x / 2 - textPainter.width / 2,
+          startY + i * (buttonHeight + buttonSpacing) - textPainter.height / 2,
+        ),
+      );
+    }
+
+    // Instructions
+    final instructionPainter = TextPainter(
+      text: const TextSpan(
+        text: 'Tap a mode to start playing',
+        style: TextStyle(
+          color: Colors.white70,
+          fontSize: 16,
+          fontStyle: FontStyle.italic,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    instructionPainter.layout();
+    instructionPainter.paint(
+      canvas,
+      Offset(
+        size.x / 2 - instructionPainter.width / 2,
+        size.y * 0.85,
+      ),
+    );
+  }
+
+  void _drawRulesOverlay(Canvas canvas) {
+    // Draw semi-transparent overlay
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, size.x, size.y),
+      Paint()..color = Colors.black.withOpacity(0.9),
+    );
+
+    final baseFontSize = 16.0 * scaleFactor;
+    final contentWidth = min(400.0, size.x * 0.8);
+    final contentHeight = min(500.0, size.y * 0.8);
+
+    // Rules content background
+    final contentRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: Offset(size.x / 2, size.y / 2),
+        width: contentWidth,
+        height: contentHeight,
+      ),
+      Radius.circular(20),
+    );
+
+    canvas.drawRRect(
+      contentRect,
+      Paint()
+        ..shader = LinearGradient(
+          colors: [
+            Colors.blue[900]!.withOpacity(0.9),
+            Colors.purple[900]!.withOpacity(0.9),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ).createShader(contentRect.outerRect),
+    );
+
+    // Title
+    final titlePainter = TextPainter(
+      text: TextSpan(
+        text: 'Game Rules',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: baseFontSize * 2.0,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    titlePainter.layout();
+    titlePainter.paint(
+      canvas,
+      Offset(size.x / 2 - titlePainter.width / 2, size.y * 0.15),
+    );
+
+    // Rules text
+    final rulesText = '''
+• Drag and drop blocks onto the grid
+• Complete full rows or columns to clear them
+• Clear 3x3 squares for bonus points
+• Use hints when stuck (costs points)
+• Different game modes available:
+  - 2 Minutes: Race against time
+  - 5 Minutes: Balanced gameplay
+  - 10 Minutes: Strategic play
+  - Unlimited: No time pressure
+
+• Special blocks:
+  🟡 Line Clear: Clears entire lines
+  🟣 Color Bomb: Clears all blocks of same color
+  🔵 Time Slow: Slows down time
+  🟢 Shrink: Makes blocks smaller
+
+• Score multipliers for quick placements
+• Compete for high scores in each mode!
+''';
+
+    final rulesPainter = TextPainter(
+      text: TextSpan(
+        text: rulesText,
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: baseFontSize * 0.9,
+          height: 1.4,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    rulesPainter.layout(maxWidth: contentWidth - 40);
+    rulesPainter.paint(
+      canvas,
+      Offset(size.x / 2 - rulesPainter.width / 2, size.y * 0.22),
+    );
+
+    // Close button
+    final closeButtonRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: Offset(size.x / 2, size.y * 0.85),
+        width: 120,
+        height: 50,
+      ),
+      const Radius.circular(25),
+    );
+
+    canvas.drawRRect(
+      closeButtonRect,
+      Paint()
+        ..shader = LinearGradient(
+          colors: [Colors.green[700]!, Colors.green[500]!],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ).createShader(closeButtonRect.outerRect),
+    );
+
+    final closePainter = TextPainter(
+      text: const TextSpan(
+        text: 'Close',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    closePainter.layout();
+    closePainter.paint(
+      canvas,
+      Offset(
+        size.x / 2 - closePainter.width / 2,
+        size.y * 0.85 - closePainter.height / 2,
+      ),
+    );
+  }
+
+  Color _getVariantColor(GameTimeVariant variant) {
+    switch (variant) {
+      case GameTimeVariant.twoMinutes:
+        return Colors.red[400]!;
+      case GameTimeVariant.fiveMinutes:
+        return Colors.orange[400]!;
+      case GameTimeVariant.tenMinutes:
+        return Colors.green[400]!;
+      case GameTimeVariant.unlimited:
+        return Colors.blue[400]!;
     }
   }
 
   void _drawLampIcon(Canvas canvas, Offset center, bool isActive) {
     final iconSize = 20.0 * smallScaleFactor;
     final iconColor = isActive ? Colors.yellow : Colors.grey;
-    
+
     final bulbPaint = Paint()
       ..color = iconColor
       ..style = PaintingStyle.fill;
-    
+
     canvas.drawCircle(center, iconSize * 0.4, bulbPaint);
-    
+
     if (isActive) {
       final rayPaint = Paint()
         ..color = Colors.yellow.withOpacity(0.3)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.5;
-      
+
       for (int i = 0; i < 4; i++) {
         final angle = i * pi / 2;
         final start = center;
@@ -1220,27 +1878,28 @@ class BlockBlastGame extends FlameGame with PanDetector {
         canvas.drawLine(start, end, rayPaint);
       }
     }
-    
+
     final standPaint = Paint()
       ..color = iconColor
       ..style = PaintingStyle.fill;
-    
+
     final standRect = Rect.fromCenter(
       center: Offset(center.dx, center.dy + iconSize * 0.3),
       width: iconSize * 0.3,
       height: iconSize * 0.4,
     );
-    
+
     canvas.drawRect(standRect, standPaint);
   }
 
   void _drawAiFeedback(Canvas canvas) {
+    final baseFontSize = 16.0 * scaleFactor;
     final feedbackPainter = TextPainter(
       text: TextSpan(
         text: aiFeedback,
         style: TextStyle(
           color: feedbackColor.withOpacity(feedbackOpacity),
-          fontSize: 20.0 * scaleFactor,
+          fontSize: baseFontSize * 1.2,
           fontWeight: FontWeight.bold,
           shadows: [
             Shadow(
@@ -1254,14 +1913,156 @@ class BlockBlastGame extends FlameGame with PanDetector {
       textDirection: TextDirection.ltr,
     );
     feedbackPainter.layout();
-    
+
     final feedbackX = size.x / 2 - feedbackPainter.width / 2;
     final feedbackY = size.y / 2 - 50;
-    
+
     feedbackPainter.paint(canvas, Offset(feedbackX, feedbackY));
   }
 
-  void _drawContinuePrompt(Canvas canvas, double baseFontSize) {
+  void _drawGameOverScreen(Canvas canvas) {
+    final baseFontSize = 16.0 * scaleFactor;
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, size.x, size.y),
+      Paint()..color = Colors.black.withOpacity(0.8),
+    );
+
+    final gameOverText = 'Game Over';
+    final gameOverPainter = TextPainter(
+      text: TextSpan(
+        text: gameOverText,
+        style: TextStyle(
+          color: Colors.redAccent,
+          fontSize: baseFontSize * 2.5,
+          fontWeight: FontWeight.bold,
+          shadows: [
+            Shadow(
+              blurRadius: 12,
+              color: Colors.red[300]!.withOpacity(0.7),
+              offset: const Offset(0, 0),
+            ),
+          ],
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    gameOverPainter.layout();
+    gameOverPainter.paint(
+      canvas,
+      Offset(
+        size.x / 2 - gameOverPainter.width / 2,
+        size.y / 2 - gameOverPainter.height - 50,
+      ),
+    );
+
+    final scoreText = 'Final Score: $score';
+    final scorePainter = TextPainter(
+      text: TextSpan(
+        text: scoreText,
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: baseFontSize * 1.8,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    scorePainter.layout();
+    scorePainter.paint(
+      canvas,
+      Offset(size.x / 2 - scorePainter.width / 2, size.y / 2),
+    );
+
+    final highScoreText = 'High Score: ${getHighScoreForVariant(currentTimeVariant)}';
+    final highScorePainter = TextPainter(
+      text: TextSpan(
+        text: highScoreText,
+        style: TextStyle(
+          color: Colors.yellow,
+          fontSize: baseFontSize * 1.5,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    highScorePainter.layout();
+    highScorePainter.paint(
+      canvas,
+      Offset(size.x / 2 - highScorePainter.width / 2, size.y / 2 + 50),
+    );
+
+    // Restart button
+    final restartButtonRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(
+        center: Offset(size.x / 2, size.y / 2 + 120),
+        width: 200,
+        height: 50,
+      ),
+      const Radius.circular(25),
+    );
+
+    canvas.drawRRect(
+      restartButtonRect,
+      Paint()
+        ..shader = LinearGradient(
+          colors: [Colors.green[700]!, Colors.green[500]!],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ).createShader(restartButtonRect.outerRect),
+    );
+
+    final restartPainter = TextPainter(
+      text: const TextSpan(
+        text: 'Play Again',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 20,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    restartPainter.layout();
+    restartPainter.paint(
+      canvas,
+      Offset(
+        size.x / 2 - restartPainter.width / 2,
+        size.y / 2 + 120 - restartPainter.height / 2,
+      ),
+    );
+  }
+
+  void _drawPauseScreen(Canvas canvas) {
+    final baseFontSize = 16.0 * scaleFactor;
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, size.x, size.y),
+      Paint()..color = Colors.black.withOpacity(0.6),
+    );
+
+    final pauseText = 'Paused';
+    final pausePainter = TextPainter(
+      text: TextSpan(
+        text: pauseText,
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: baseFontSize * 2.0,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    pausePainter.layout();
+    pausePainter.paint(
+      canvas,
+      Offset(
+        size.x / 2 - pausePainter.width / 2,
+        size.y / 2 - pausePainter.height / 2,
+      ),
+    );
+  }
+
+  void _drawContinuePrompt(Canvas canvas) {
+    final baseFontSize = 16.0 * scaleFactor;
     canvas.drawRect(
       Rect.fromLTWH(0, 0, size.x, size.y),
       Paint()..color = Colors.black.withOpacity(0.7),
@@ -1329,7 +2130,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
       final yesRect = RRect.fromRectAndRadius(
         Rect.fromCenter(
-          center: Offset(size.x / 2 - buttonWidth * 0.8, size.y / 2 + promptHeight * 0.2),
+          center: Offset(
+            size.x / 2 - buttonWidth * 0.8,
+            size.y / 2 + promptHeight * 0.2,
+          ),
           width: buttonWidth,
           height: buttonHeight,
         ),
@@ -1358,7 +2162,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
       final noRect = RRect.fromRectAndRadius(
         Rect.fromCenter(
-          center: Offset(size.x / 2 + buttonWidth * 0.8, size.y / 2 + promptHeight * 0.2),
+          center: Offset(
+            size.x / 2 + buttonWidth * 0.8,
+            size.y / 2 + promptHeight * 0.2,
+          ),
           width: buttonWidth,
           height: buttonHeight,
         ),
@@ -1425,7 +2232,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
         ),
       );
     } else {
-      final promptText = 'Cannot continue with odd score: $score\nGame Over!';
+      final promptText = '$score\nGame Over!';
       final promptPainter = TextPainter(
         text: TextSpan(
           text: promptText,
@@ -1451,6 +2258,8 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
   @override
   void onPanUpdate(DragUpdateInfo info) {
+    if (isGameOver || isPaused || showContinuePrompt || showTimeVariantMenu || showRulesOverlay) return;
+
     if (draggingBlock != null) {
       draggingBlock!.position += Offset(
         info.delta.global.x,
@@ -1458,18 +2267,22 @@ class BlockBlastGame extends FlameGame with PanDetector {
       );
 
       final blockCenter = Offset(
-        draggingBlock!.position.dx + (draggingBlock!.shape[0].length * cellSize) / 2,
-        draggingBlock!.position.dy + (draggingBlock!.shape.length * cellSize) / 2,
+        draggingBlock!.position.dx +
+            (draggingBlock!.shape[0].length * cellSize) / 2,
+        draggingBlock!.position.dy +
+            (draggingBlock!.shape.length * cellSize) / 2,
       );
 
       final gridPos = getGridPosition(blockCenter);
       if (gridPos != null) {
         final (startX, startY) = gridPos;
         final adjustedX = (startX - draggingBlock!.shape[0].length ~/ 2).clamp(
-          0, gridSize - draggingBlock!.shape[0].length,
+          0,
+          gridSize - draggingBlock!.shape[0].length,
         );
         final adjustedY = (startY - draggingBlock!.shape.length ~/ 2).clamp(
-          0, gridSize - draggingBlock!.shape.length,
+          0,
+          gridSize - draggingBlock!.shape.length,
         );
 
         currentGridPosition = (adjustedX, adjustedY);
@@ -1511,6 +2324,51 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
   @override
   void onPanDown(DragDownInfo info) {
+    if (isPaused) return;
+
+    if (showTimeVariantMenu) {
+      final touchX = info.eventPosition.global.x;
+      final touchY = info.eventPosition.global.y;
+
+      final buttonWidth = min(300.0, size.x * 0.7);
+      final buttonHeight = 60.0 * smallScaleFactor;
+      final buttonSpacing = 20.0 * smallScaleFactor;
+      double startY = size.y * 0.25;
+
+      final variants = GameTimeVariant.values;
+      for (int i = 0; i < variants.length; i++) {
+        final buttonRect = Rect.fromCenter(
+          center: Offset(size.x / 2, startY + i * (buttonHeight + buttonSpacing)),
+          width: buttonWidth,
+          height: buttonHeight,
+        );
+
+        if (buttonRect.contains(Offset(touchX, touchY))) {
+          setTimeVariant(variants[i]);
+          return;
+        }
+      }
+      return;
+    }
+
+    if (showRulesOverlay) {
+      final touchX = info.eventPosition.global.x;
+      final touchY = info.eventPosition.global.y;
+
+      // Close button
+      final closeButtonRect = Rect.fromCenter(
+        center: Offset(size.x / 2, size.y * 0.85),
+        width: 120,
+        height: 50,
+      );
+
+      if (closeButtonRect.contains(Offset(touchX, touchY))) {
+        hideRules();
+        return;
+      }
+      return;
+    }
+
     if (showContinuePrompt) {
       final touchX = info.eventPosition.global.x;
       final touchY = info.eventPosition.global.y;
@@ -1518,13 +2376,19 @@ class BlockBlastGame extends FlameGame with PanDetector {
       if (score % 2 == 0) {
         final buttonWidth = min(120.0, size.x * 0.3);
         final yesButtonRect = Rect.fromCenter(
-          center: Offset(size.x / 2 - buttonWidth * 0.8, size.y / 2 + (min(200.0, size.y * 0.3)) * 0.2),
+          center: Offset(
+            size.x / 2 - buttonWidth * 0.8,
+            size.y / 2 + (min(200.0, size.y * 0.3)) * 0.2,
+          ),
           width: buttonWidth,
           height: min(50.0, size.y * 0.08),
         );
 
         final noButtonRect = Rect.fromCenter(
-          center: Offset(size.x / 2 + buttonWidth * 0.8, size.y / 2 + (min(200.0, size.y * 0.3)) * 0.2),
+          center: Offset(
+            size.x / 2 + buttonWidth * 0.8,
+            size.y / 2 + (min(200.0, size.y * 0.3)) * 0.2,
+          ),
           width: buttonWidth,
           height: min(50.0, size.y * 0.08),
         );
@@ -1540,6 +2404,22 @@ class BlockBlastGame extends FlameGame with PanDetector {
       return;
     }
 
+    if (isGameOver) {
+      final touchX = info.eventPosition.global.x;
+      final touchY = info.eventPosition.global.y;
+
+      final restartButtonRect = Rect.fromCenter(
+        center: Offset(size.x / 2, size.y / 2 + 120),
+        width: 200,
+        height: 50,
+      );
+
+      if (restartButtonRect.contains(Offset(touchX, touchY))) {
+        showTimeVariantSelection();
+      }
+      return;
+    }
+
     final touch = Offset(
       info.eventPosition.global.x,
       info.eventPosition.global.y,
@@ -1548,25 +2428,48 @@ class BlockBlastGame extends FlameGame with PanDetector {
     // Check if hint button was tapped
     final hintButtonSize = 50.0 * smallScaleFactor;
     final hintButtonRect = Rect.fromCenter(
-      center: Offset(hintButtonSize / 2 + 10, (40.0 * smallScaleFactor) / 2 + 10),
+      center: Offset(
+        hintButtonSize / 2 + 10,
+        (40.0 * smallScaleFactor) / 2 + 10,
+      ),
       width: hintButtonSize,
       height: hintButtonSize,
     );
-    
+
     if (hintButtonRect.contains(touch) && isHintAvailable) {
       activateHint();
       return;
     }
 
-    // Check if rules icon button was tapped
+    // Check if rules button was tapped
     final rulesButtonSize = 50.0 * smallScaleFactor;
     final rulesButtonRect = Rect.fromCenter(
-      center: Offset(size.x - rulesButtonSize / 2 - 10, (40.0 * smallScaleFactor) / 2 + 10),
+      center: Offset(
+        size.x - rulesButtonSize / 2 - 10,
+        (40.0 * smallScaleFactor) / 2 + 10,
+      ),
       width: rulesButtonSize,
       height: rulesButtonSize,
     );
+
     if (rulesButtonRect.contains(touch)) {
-      overlays.add('rules');
+      showRules();
+      return;
+    }
+
+    // Check if restart button was tapped
+    final restartButtonSize = 50.0 * smallScaleFactor;
+    final restartButtonRect = Rect.fromCenter(
+      center: Offset(
+        size.x - restartButtonSize / 2 - 70,
+        (40.0 * smallScaleFactor) / 2 + 10,
+      ),
+      width: restartButtonSize,
+      height: restartButtonSize,
+    );
+
+    if (restartButtonRect.contains(touch)) {
+      restartGame();
       return;
     }
 
@@ -1589,10 +2492,14 @@ class BlockBlastGame extends FlameGame with PanDetector {
 
   @override
   void onPanEnd(DragEndInfo info) {
+    if (isGameOver || isPaused || showContinuePrompt || showTimeVariantMenu || showRulesOverlay) return;
+
     if (draggingBlock != null) {
       final blockCenter = Offset(
-        draggingBlock!.position.dx + (draggingBlock!.shape[0].length * cellSize) / 2,
-        draggingBlock!.position.dy + (draggingBlock!.shape.length * cellSize) / 2,
+        draggingBlock!.position.dx +
+            (draggingBlock!.shape[0].length * cellSize) / 2,
+        draggingBlock!.position.dy +
+            (draggingBlock!.shape.length * cellSize) / 2,
       );
 
       final gridPos = getGridPosition(blockCenter);
@@ -1600,10 +2507,12 @@ class BlockBlastGame extends FlameGame with PanDetector {
       if (gridPos != null) {
         final (startX, startY) = gridPos;
         final adjustedX = (startX - draggingBlock!.shape[0].length ~/ 2).clamp(
-          0, gridSize - draggingBlock!.shape[0].length,
+          0,
+          gridSize - draggingBlock!.shape[0].length,
         );
         final adjustedY = (startY - draggingBlock!.shape.length ~/ 2).clamp(
-          0, gridSize - draggingBlock!.shape.length,
+          0,
+          gridSize - draggingBlock!.shape.length,
         );
 
         if (canPlace(draggingBlock!.shape, adjustedX, adjustedY)) {
@@ -1740,7 +2649,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
       if (grid[y].every((cell) => cell != null)) {
         completedRows++;
         _playGoodSound();
-        
+
         for (int x = 0; x < gridSize; x++) {
           final color = grid[y][x]!;
           cellClearEffects.add((row: y, col: x, scale: 1.0, opacity: 1.0));
@@ -1784,7 +2693,7 @@ class BlockBlastGame extends FlameGame with PanDetector {
       if (fullCol) {
         completedColumns++;
         _playGoodSound();
-        
+
         for (int y = 0; y < gridSize; y++) {
           final color = grid[y][x]!;
           cellClearEffects.add((row: y, col: x, scale: 1.0, opacity: 1.0));
@@ -1838,8 +2747,10 @@ class BlockBlastGame extends FlameGame with PanDetector {
       scoreMultiplier = 1.0;
     }
 
-    int baseScore = (completedRows + completedColumns) * 20 + completedSquares * 50;
-    int finalScore = (baseScore * chainBonus * timeBonus * scoreMultiplier).round();
+    int baseScore =
+        (completedRows + completedColumns) * 20 + completedSquares * 50;
+    int finalScore = (baseScore * chainBonus * timeBonus * scoreMultiplier)
+        .round();
 
     if (finalScore > 0) {
       score += finalScore;
